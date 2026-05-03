@@ -194,14 +194,34 @@ class Secp256k1:
     SECP256K1_EC_COMPRESSED  = 258
 
     def __init__(self):
-        lib_name = ctypes.util.find_library("secp256k1")
-        if lib_name is None:
+        import glob
+        # ctypes.util.find_library searches standard system paths which are
+        # not present in a Nix-built container. Try several strategies:
+        #   1. LIBSECP256K1_PATH env var (explicit override, always wins)
+        #   2. find_library (works on standard Linux systems)
+        #   3. Glob the Nix store directly (works in Nix-built containers)
+        lib_path = os.environ.get("LIBSECP256K1_PATH")
+
+        if not lib_path:
+            lib_name = ctypes.util.find_library("secp256k1")
+            if lib_name:
+                lib_path = lib_name
+
+        if not lib_path:
+            candidates = sorted(
+                glob.glob("/nix/store/*secp256k1*/lib/libsecp256k1.so*")
+            )
+            if candidates:
+                lib_path = candidates[-1]
+
+        if not lib_path:
             raise RuntimeError(
                 "libsecp256k1 not found. "
                 "NixOS: pkgs.secp256k1 | Debian/Ubuntu: libsecp256k1-dev | "
-                "Alpine: secp256k1-dev"
+                "Alpine: secp256k1-dev | "
+                "Override: set LIBSECP256K1_PATH=/path/to/libsecp256k1.so"
             )
-        self._lib = ctypes.CDLL(lib_name)
+        self._lib = ctypes.CDLL(lib_path)
         self._ctx = self._lib.secp256k1_context_create(
             self.SECP256K1_CONTEXT_SIGN | self.SECP256K1_CONTEXT_VERIFY
         )
