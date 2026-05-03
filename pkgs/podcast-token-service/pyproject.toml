@@ -23,6 +23,6 @@ dependencies = [
 podcast-token-service  = "token_service:main"
 podcast-members-manage = "manage:main"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["token_service*", "manage*"]
+[tool.setuptools.py-modules]
+token_service = "token_service"
+manage = "manage"
