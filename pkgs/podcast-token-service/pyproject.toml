@@ -16,11 +16,13 @@ dependencies = [
     "cryptography",
     "cffi",
     "websockets",
+    "prometheus-client",
 ]
 
 [project.scripts]
-podcast-token-service = "token_service:main"
+podcast-token-service  = "token_service:main"
+podcast-members-manage = "manage:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["token_service*"]
+include = ["token_service*", "manage*"]

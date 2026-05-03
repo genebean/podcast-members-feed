@@ -1,0 +1,155 @@
+---
+# podcast-members-feed.rules.yml
+#
+# Prometheus alerting rules for the podcast members feed token service.
+#
+# Include in your Prometheus configuration:
+#   rule_files:
+#     - /etc/prometheus/rules/podcast-members-feed.rules.yml
+#
+# On NixOS:
+#   services.prometheus.ruleFiles = [
+#     ./alerts/podcast-members-feed.rules.yml
+#   ];
+#
+# Alerts use severity labels only. Wire up receivers in your
+# AlertManager routing tree as appropriate for your setup.
+
+groups:
+  - name: podcast_members_feed
+    rules:
+
+      # -----------------------------------------------------------------------
+      # Critical — subscriber did not receive their feed URL
+      # Email delivery failing means new subscribers are left without access.
+      # -----------------------------------------------------------------------
+      - alert: PodcastEmailDeliveryFailing
+        expr: |
+          increase(podcast_email_total{result="failure"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Podcast member email delivery is failing"
+          description: >
+            Email delivery has failed {{ $value }} time(s) in the last 5
+            minutes. New subscribers are not receiving their feed URLs.
+            Check SMTP credentials and connectivity.
+
+      # -----------------------------------------------------------------------
+      # Critical — BTCPay webhooks failing signature verification
+      # Sustained invalid signatures indicate a misconfigured webhook secret
+      # or an active probing attempt.
+      # -----------------------------------------------------------------------
+      - alert: PodcastWebhookSignatureErrors
+        expr: |
+          increase(
+            podcast_webhook_errors_total{reason="invalid_signature"}[10m]
+          ) > 5
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "BTCPay webhook signature verification failures"
+          description: >
+            {{ $value }} webhook requests with invalid signatures in the
+            last 10 minutes. Check that BTCPAY_WEBHOOK_SECRET matches the
+            value configured in BTCPay Store Settings > Webhooks.
+
+      # -----------------------------------------------------------------------
+      # Critical — no webhooks received in an extended period
+      # May indicate BTCPay stopped firing, network connectivity issues,
+      # or the webhook URL is misconfigured. Only fires during hours when
+      # activity would be expected — adjust the time window to suit.
+      # -----------------------------------------------------------------------
+      - alert: PodcastWebhookSilence
+        expr: |
+          increase(podcast_webhooks_total[7d]) == 0
+            and on() hour() >= 8 and on() hour() <= 22
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "No BTCPay webhooks received in 7 days"
+          description: >
+            No subscription webhook events have been processed in 7 days.
+            Verify BTCPay webhook configuration and that the token service
+            is reachable from BTCPay.
+
+      # -----------------------------------------------------------------------
+      # Warning — upstream PodServer feed unreachable
+      # Subscribers can still reach the token service endpoint but will
+      # receive 502 errors until PodServer is reachable again.
+      # -----------------------------------------------------------------------
+      - alert: PodcastUpstreamFeedErrors
+        expr: |
+          increase(podcast_feed_upstream_errors_total[10m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PodServer upstream feed is unreachable"
+          description: >
+            The token service has failed to fetch the upstream PodServer
+            RSS feed {{ $value }} time(s) in the last 10 minutes.
+            Subscribers requesting their feed are receiving 502 errors.
+            Check PodServer availability and PODSERVER_FEED_URL.
+
+      # -----------------------------------------------------------------------
+      # Warning — active token count dropped significantly
+      # A large sudden drop may indicate a mass revocation, a database
+      # sync issue, or bulk subscription cancellations worth investigating.
+      # -----------------------------------------------------------------------
+      - alert: PodcastActiveTokensDrop
+        expr: |
+          (
+            podcast_active_tokens
+            / podcast_active_tokens offset 1h
+          ) < 0.8
+            and podcast_active_tokens offset 1h > 10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Active podcast subscriber tokens dropped by >20%"
+          description: >
+            Active token count has dropped from
+            {{ printf "%.0f" (query "podcast_active_tokens offset 1h" | first | value) }}
+            to {{ $value }} in the last hour — a drop of more than 20%.
+            Check the token service logs and BTCPay subscription dashboard.
+
+      # -----------------------------------------------------------------------
+      # Warning — Nostr DM delivery failing on all relays
+      # Non-critical since email is still delivered, but worth investigating.
+      # Subscribers who rely on Nostr DM delivery are affected.
+      # -----------------------------------------------------------------------
+      - alert: PodcastNostrDMsFailing
+        expr: |
+          increase(podcast_nostr_dm_total{result="failure"}[15m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Nostr DM delivery failing on all configured relays"
+          description: >
+            Nostr DM delivery has failed {{ $value }} time(s) in the last
+            15 minutes. Email delivery is unaffected. Check relay
+            connectivity and that NOSTR_PRIVATE_KEY is valid.
+
+      # -----------------------------------------------------------------------
+      # Info — token service is down
+      # Basic liveness check. Your uptime monitor should also cover this,
+      # but having it as an alert ensures it surfaces in AlertManager.
+      # -----------------------------------------------------------------------
+      - alert: PodcastTokenServiceDown
+        expr: |
+          up{job="podcast_token_service"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Podcast token service is unreachable"
+          description: >
+            The podcast token service has not responded to Prometheus
+            scrapes for 2 minutes. Subscribers requesting their feed
+            will receive errors. Check the service status.

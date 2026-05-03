@@ -1,0 +1,41 @@
+# compose.yml — Podcast token service for Path A (Umbrel + VPS)
+#
+# Deploy on the VPS alongside nginx and Tailscale.
+# The token service connects back to your Umbrel's BTCPay/PodServer
+# via the Tailscale network.
+#
+# Setup:
+#   1. Copy .env.example to .env and fill in all values
+#   2. Pull the image:
+#        podman pull ghcr.io/genebean/podcast-members-feed:latest
+#   3. podman compose up -d
+#
+# The service listens on 127.0.0.1:8765 only.
+# nginx proxies /rss/, /webhook/btcpay, /api/feed-url, /recover, and
+# /health to it.
+# /metrics is proxied but requires a bearer token (see nginx config).
+# /admin/ endpoints are NOT proxied — access on the host directly:
+#   curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+#     http://127.0.0.1:8765/admin/cleanup
+#
+# Management CLI via podman exec:
+#   podman exec podcast-token-service \
+#     podcast-members-manage --db /var/lib/podcast-token-service/tokens.db \
+#     stats
+
+services:
+  token-service:
+    image: ghcr.io/genebean/podcast-members-feed:latest
+    container_name: podcast-token-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - ./data:/var/lib/podcast-token-service
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8765/health"]
+      interval: 30s
+      timeout:  5s
+      retries:  3

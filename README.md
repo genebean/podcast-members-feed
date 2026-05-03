@@ -2,41 +2,56 @@
 
 Reference implementation for the architecture described in:
 
-**[Lightning-Gated Podcast Members Feeds with BTCPay Server](#)**  
-*(link to be added when the article is published)*
+**[Lightning-Gated Podcast Members Feeds with BTCPay Server](#)**
+*(link added when article is published)*
 
-This repository contains:
+Self-hosted Bitcoin-native podcast membership using BTCPay Server subscriptions,
+private RSS feeds, and a small token service that bridges the two.
 
-- `pkgs/podcast-token-service/` — the token service Python application
-- `modules/services/podcast-token-service.nix` — NixOS module
-- `nixos-configurations/example-host/` — complete example host configuration
-- `docker/` — Docker Compose setup for the Umbrel + VPS deployment path
-- `.github/workflows/container.yml` — GitHub Actions workflow to build and push the container image to ghcr.io
+## Repository layout
 
-## Quick start
+```
+pkgs/podcast-token-service/   Python service + CLI (token_service.py, manage.py)
+modules/services/             NixOS module
+nixos-configurations/         Complete example host configuration
+podman/                       Podman Compose setup for Path A (Umbrel + VPS)
+alerts/                       Prometheus/AlertManager rules
+.github/workflows/            GitHub Actions: build and push container image
+```
+
+## Deployment paths
 
 ### Path A: Umbrel + VPS
 
-See the article. In brief:
+For people already running Umbrel or who want a quick start.
+BTCPay, LND, and Alby Hub run on Umbrel. The token service runs as
+a Podman container on a small VPS connected via Tailscale.
 
-1. Set up Tailscale between your Umbrel and a VPS
-2. Copy `docker/compose.yml` and `docker/.env.example` to your VPS
-3. Fill in `.env`
-4. Pull the image: `docker pull ghcr.io/YOUR_ORG/podcast-token-service:latest`
-5. `docker compose up -d`
+```bash
+git clone https://github.com/genebean/podcast-members-feed.git
+cd podcast-members-feed/podman
+cp .env.example .env
+# Edit .env with your values
+podman pull ghcr.io/genebean/podcast-members-feed:latest
+podman compose up -d
+```
 
 ### Path B: NixOS
 
-Add this repo as a flake input:
+For a fully declarative production setup using nix-bitcoin.
+
+Add as a flake input:
 
 ```nix
-inputs.podcast-members-feed = {
-  url = "github:YOUR_ORG/podcast-members-feed";
-  inputs.nixpkgs.follows = "nix-bitcoin/nixpkgs";
+inputs = {
+  podcast-members-feed.url = "github:genebean/podcast-members-feed";
+  # Follow through for consistent nixpkgs
+  nixpkgs.follows          = "podcast-members-feed/nixpkgs";
+  nixpkgs-unstable.follows = "podcast-members-feed/nixpkgs-unstable";
 };
 ```
 
-Import the module and configure the service:
+Import the module and enable the service:
 
 ```nix
 imports = [ podcast-members-feed.nixosModules.podcast-token-service ];
@@ -49,22 +64,79 @@ services.podcastTokenService = {
 ```
 
 See `nixos-configurations/example-host/configuration.nix` for a complete
-example including nix-bitcoin, nginx, TLS, Tailscale, and sops-nix.
+example including nix-bitcoin, Alby Hub, nginx, TLS, Tailscale, and sops-nix.
+
+After cloning, generate the lock file before building:
+
+```bash
+nix flake update
+git add flake.lock
+```
+
+## Management CLI
+
+The `podcast-members-manage` command is installed alongside the service.
+
+```bash
+# NixOS
+podcast-members-manage stats
+podcast-members-manage subscribers --active
+podcast-members-manage subscribers --expiring-days 7
+podcast-members-manage feed-url --email subscriber@example.com
+podcast-members-manage revoke <btcpay-subscriber-id>
+
+# Podman (Path A)
+podman exec podcast-token-service \
+  podcast-members-manage \
+  --db /var/lib/podcast-token-service/tokens.db \
+  stats
+```
+
+## Monitoring
+
+The service exposes Prometheus metrics at `/metrics` with bearer token auth.
+
+Example scrape config:
+
+```yaml
+- job_name: podcast_token_service
+  bearer_token: YOUR_ADMIN_TOKEN
+  static_configs:
+    - targets: ["members.yourpodcast.com"]
+  scheme: https
+```
+
+AlertManager rules are in `alerts/podcast-members-feed.rules.yml`.
+Include in Prometheus:
+
+```yaml
+rule_files:
+  - /etc/prometheus/rules/podcast-members-feed.rules.yml
+```
+
+On NixOS:
+
+```nix
+services.prometheus.ruleFiles = [
+  ./alerts/podcast-members-feed.rules.yml
+];
+```
 
 ## Building the container locally
 
 ```bash
 nix build .#dockerImage
-docker load < result
-docker run --rm -p 8765:8765 --env-file docker/.env podcast-token-service:latest
+podman load < result
+podman run --rm -p 8765:8765 \
+  --env-file podman/.env \
+  podcast-token-service:latest
 ```
 
 ## Requirements
 
-- `libsecp256k1` must be available as a system library
-  - NixOS: provided by `pkgs.secp256k1` via the Nix derivation
-  - Debian/Ubuntu: `apt install libsecp256k1-dev`
-  - Alpine: `apk add secp256k1-dev`
+`libsecp256k1` must be available as a system library:
+- NixOS: provided by `pkgs.secp256k1` via the derivation
+- The Podman image handles this automatically
 
 ## License
 

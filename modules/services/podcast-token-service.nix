@@ -15,20 +15,22 @@ in {
       type        = lib.types.path;
       description = ''
         Path to a file containing environment variable secrets, decrypted
-        at runtime by sops-nix or agenix.
+        at runtime by sops-nix or agenix. Never commit plaintext secrets.
 
         Required variables:
           BTCPAY_WEBHOOK_SECRET   shared secret from BTCPay webhook settings
           PODSERVER_FEED_URL      internal URL of the PodServer members feed
           FEED_BASE_URL           public base URL for subscriber feed URLs
+          ADMIN_TOKEN             bearer token for /metrics and /admin/
+          NOSTR_PRIVATE_KEY       nsec or hex key for the service keypair
+
+        Optional variables:
+          EXPIRED_AUDIO_URL       URL of the subscription-expired audio clip
           SMTP_HOST               SMTP server hostname
-          SMTP_PORT               SMTP server port (default: 587)
+          SMTP_PORT               SMTP port (default: 587)
           SMTP_USER               SMTP username
           SMTP_PASSWORD           SMTP password
           SMTP_FROM               From address for delivery emails
-          NOSTR_PRIVATE_KEY       nsec or hex key for the service Nostr keypair
-
-        Optional:
           DATABASE_PATH           override the default database path
       '';
     };
@@ -42,7 +44,12 @@ in {
     port = lib.mkOption {
       type        = lib.types.port;
       default     = 8765;
-      description = "Port to listen on (127.0.0.1 only — nginx proxies externally).";
+      description = ''
+        Port to listen on. The service binds to 127.0.0.1 only — nginx
+        proxies external traffic. /metrics listens on all interfaces
+        via a separate nginx location with bearer token auth so Prometheus
+        can scrape it from another host.
+      '';
     };
   };
 
@@ -68,7 +75,7 @@ in {
         Restart    = "on-failure";
         RestartSec = "5s";
 
-        # Systemd hardening — aligned with nix-bitcoin service conventions
+        # Hardening — aligned with nix-bitcoin service conventions
         NoNewPrivileges         = true;
         ProtectSystem           = "strict";
         ProtectHome             = true;
@@ -85,7 +92,7 @@ in {
       };
     };
 
-    # Weekly cleanup timer — removes tokens expired > 90 days ago
+    # Weekly cleanup timer
     systemd.timers.podcast-token-cleanup = {
       wantedBy    = [ "timers.target" ];
       timerConfig = {
@@ -95,10 +102,17 @@ in {
     };
 
     systemd.services.podcast-token-cleanup = {
-      description     = "Podcast token service periodic cleanup";
-      serviceConfig   = {
+      description   = "Podcast token service periodic cleanup";
+      serviceConfig = {
         Type      = "oneshot";
-        ExecStart = "${pkgs.curl}/bin/curl -sf -X POST http://127.0.0.1:${toString cfg.port}/admin/cleanup";
+        # Reads ADMIN_TOKEN from environment for the bearer token
+        EnvironmentFile = cfg.environmentFile;
+        ExecStart = pkgs.writeShellScript "podcast-cleanup" ''
+          ${pkgs.curl}/bin/curl -sf \
+            -X POST \
+            -H "Authorization: Bearer $ADMIN_TOKEN" \
+            http://127.0.0.1:${toString cfg.port}/admin/cleanup
+        '';
       };
     };
   };
