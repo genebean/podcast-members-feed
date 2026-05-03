@@ -224,19 +224,38 @@ class Secp256k1:
             )
         self._lib = ctypes.CDLL(lib_path)
 
-        # Set return types explicitly so ctypes handles pointers correctly
-        self._lib.secp256k1_context_create.restype  = ctypes.c_void_p
-        self._lib.secp256k1_context_create.argtypes = [ctypes.c_uint]
-        self._lib.secp256k1_context_randomize.restype  = ctypes.c_int
-        self._lib.secp256k1_context_randomize.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p
-        ]
+        # Declare restype and argtypes for every function we call.
+        # Without this ctypes defaults to c_int for all return values —
+        # pointer returns get truncated to 32 bits on 64-bit systems,
+        # causing segfaults when the garbage address is dereferenced.
+        p  = ctypes.c_void_p
+        cp = ctypes.c_char_p
+        ci = ctypes.c_int
+        cu = ctypes.c_uint
+        cs = ctypes.c_size_t
+
+        self._lib.secp256k1_context_create.restype        = p
+        self._lib.secp256k1_context_create.argtypes       = [cu]
+        self._lib.secp256k1_context_randomize.restype     = ci
+        self._lib.secp256k1_context_randomize.argtypes    = [p, cp]
+        self._lib.secp256k1_ec_pubkey_create.restype      = ci
+        self._lib.secp256k1_ec_pubkey_create.argtypes     = [p, p, cp]
+        self._lib.secp256k1_ec_pubkey_serialize.restype   = ci
+        self._lib.secp256k1_ec_pubkey_serialize.argtypes  = [p, cp, ctypes.POINTER(cs), p, cu]
+        self._lib.secp256k1_ec_pubkey_parse.restype       = ci
+        self._lib.secp256k1_ec_pubkey_parse.argtypes      = [p, p, cp, cs]
+        self._lib.secp256k1_schnorrsig_sign32.restype     = ci
+        self._lib.secp256k1_schnorrsig_sign32.argtypes    = [p, cp, cp, cp, cp]
+        self._lib.secp256k1_xonly_pubkey_parse.restype    = ci
+        self._lib.secp256k1_xonly_pubkey_parse.argtypes   = [p, p, cp]
+        self._lib.secp256k1_schnorrsig_verify.restype     = ci
+        self._lib.secp256k1_schnorrsig_verify.argtypes    = [p, cp, cp, cs, p]
+        self._lib.secp256k1_ecdh.restype                  = ci
+        self._lib.secp256k1_ecdh.argtypes                 = [p, cp, p, cp, p, p]
 
         # Use SECP256K1_CONTEXT_NONE (1) — the sign/verify flag split was
         # deprecated in libsecp256k1 0.4 and removed in later versions.
-        self._ctx = self._lib.secp256k1_context_create(
-            self.SECP256K1_CONTEXT_NONE
-        )
+        self._ctx = self._lib.secp256k1_context_create(self.SECP256K1_CONTEXT_NONE)
         if not self._ctx:
             raise RuntimeError("secp256k1_context_create returned NULL")
 
@@ -248,7 +267,7 @@ class Secp256k1:
         """Return 32-byte x-only public key from 32-byte private key."""
         pubkey_buf = ctypes.create_string_buffer(64)
         if not self._lib.secp256k1_ec_pubkey_create(
-            self._ctx, pubkey_buf, ctypes.c_char_p(privkey)
+            self._ctx, pubkey_buf, privkey
         ):
             raise ValueError("Invalid private key")
         output     = ctypes.create_string_buffer(33)
@@ -263,10 +282,7 @@ class Secp256k1:
         """BIP-340 Schnorr sign. msg32 must be exactly 32 bytes."""
         sig = ctypes.create_string_buffer(64)
         if not self._lib.secp256k1_schnorrsig_sign32(
-            self._ctx, sig,
-            ctypes.c_char_p(msg32),
-            ctypes.c_char_p(privkey),
-            ctypes.c_char_p(os.urandom(32)),
+            self._ctx, sig, msg32, privkey, os.urandom(32),
         ):
             raise ValueError("Schnorr signing failed")
         return bytes(sig)
@@ -277,15 +293,11 @@ class Secp256k1:
         """Verify a BIP-340 Schnorr signature. Returns True if valid."""
         xonly_buf = ctypes.create_string_buffer(64)
         if not self._lib.secp256k1_xonly_pubkey_parse(
-            self._ctx, xonly_buf, ctypes.c_char_p(pubkey32)
+            self._ctx, xonly_buf, pubkey32
         ):
             return False
         return bool(self._lib.secp256k1_schnorrsig_verify(
-            self._ctx,
-            ctypes.c_char_p(sig64),
-            ctypes.c_char_p(msg32),
-            ctypes.c_size_t(32),
-            xonly_buf,
+            self._ctx, sig64, msg32, ctypes.c_size_t(32), xonly_buf,
         ))
 
     def ecdh_x_only(self, privkey: bytes, compressed_pubkey: bytes) -> bytes:
@@ -296,7 +308,7 @@ class Secp256k1:
         pubkey_buf = ctypes.create_string_buffer(64)
         if not self._lib.secp256k1_ec_pubkey_parse(
             self._ctx, pubkey_buf,
-            ctypes.c_char_p(compressed_pubkey),
+            compressed_pubkey,
             ctypes.c_size_t(len(compressed_pubkey)),
         ):
             raise ValueError("Failed to parse recipient public key")
@@ -313,9 +325,7 @@ class Secp256k1:
 
         result = ctypes.create_string_buffer(32)
         if not self._lib.secp256k1_ecdh(
-            self._ctx, result, pubkey_buf,
-            ctypes.c_char_p(privkey),
-            HASHFP(_x_only), None,
+            self._ctx, result, pubkey_buf, privkey, HASHFP(_x_only), None,
         ):
             raise ValueError("ECDH failed")
         return bytes(result)
