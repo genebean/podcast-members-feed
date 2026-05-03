@@ -1037,9 +1037,15 @@ async def btcpay_webhook(request: Request):
             await db.upsert_subscriber(subscriber_id, email, nostr_pubkey)
             token    = await db.create_token(subscriber_id, expires_at)
             feed_url = f"{FEED_BASE_URL}/rss/{token}.xml"
-            await notifier.deliver(SubscriberInfo(
-                feed_url=feed_url, email=email, nostr_pubkey=nostr_pubkey
-            ))
+            # Notification failure must not crash the webhook handler —
+            # the token is already written and BTCPay must not be told
+            # to retry, which would create duplicate tokens.
+            try:
+                await notifier.deliver(SubscriberInfo(
+                    feed_url=feed_url, email=email, nostr_pubkey=nostr_pubkey
+                ))
+            except Exception as e:
+                logger.error(f"Notification failed for {subscriber_id}: {e}")
             metrics.webhooks_total.labels(event_type="created").inc()
             logger.info(f"New subscriber: {subscriber_id}")
 
@@ -1054,9 +1060,12 @@ async def btcpay_webhook(request: Request):
                 await db.upsert_subscriber(subscriber_id, email, nostr_pubkey)
                 token    = await db.create_token(subscriber_id, expires_at)
                 feed_url = f"{FEED_BASE_URL}/rss/{token}.xml"
-                await notifier.deliver(SubscriberInfo(
-                    feed_url=feed_url, email=email, nostr_pubkey=nostr_pubkey
-                ))
+                try:
+                    await notifier.deliver(SubscriberInfo(
+                        feed_url=feed_url, email=email, nostr_pubkey=nostr_pubkey
+                    ))
+                except Exception as e:
+                    logger.error(f"Notification failed for {subscriber_id}: {e}")
                 metrics.webhooks_total.labels(event_type="renewed").inc()
                 logger.info(f"Re-subscribed: {subscriber_id}")
 
