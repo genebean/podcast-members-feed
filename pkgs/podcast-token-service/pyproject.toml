@@ -23,6 +23,5 @@ dependencies = [
 podcast-token-service  = "token_service:main"
 podcast-members-manage = "manage:main"
 
-[tool.setuptools.py-modules]
-token_service = "token_service"
-manage = "manage"
+[tool.setuptools]
+py-modules = ["token_service", "manage"]
