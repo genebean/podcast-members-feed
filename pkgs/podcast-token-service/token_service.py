@@ -189,9 +189,10 @@ class Secp256k1:
     Alpine: secp256k1-dev
     """
 
-    SECP256K1_CONTEXT_SIGN   = 1
-    SECP256K1_CONTEXT_VERIFY = 2
-    SECP256K1_EC_COMPRESSED  = 258
+    # SECP256K1_CONTEXT_NONE = 1 is the correct flag for libsecp256k1 >= 0.4
+    # The old SIGN=1 / VERIFY=2 flags were deprecated and removed.
+    SECP256K1_CONTEXT_NONE  = 1
+    SECP256K1_EC_COMPRESSED = 258
 
     def __init__(self):
         import glob
@@ -222,8 +223,10 @@ class Secp256k1:
                 "Override: set LIBSECP256K1_PATH=/path/to/libsecp256k1.so"
             )
         self._lib = ctypes.CDLL(lib_path)
+        # Use SECP256K1_CONTEXT_NONE (1) — the sign/verify flag split was
+        # deprecated in libsecp256k1 0.4 and removed in later versions.
         self._ctx = self._lib.secp256k1_context_create(
-            self.SECP256K1_CONTEXT_SIGN | self.SECP256K1_CONTEXT_VERIFY
+            self.SECP256K1_CONTEXT_NONE
         )
         self._lib.secp256k1_context_randomize(
             self._ctx, ctypes.c_char_p(os.urandom(32))
