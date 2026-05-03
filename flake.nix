@@ -26,7 +26,8 @@
           tag    = "latest";
           contents = [
             self.packages.${system}.podcast-token-service
-            pkgs.cacert  # needed for outbound TLS (relay connections, feed fetch)
+            pkgs.cacert    # needed for outbound TLS (relay connections, feed fetch)
+            pkgs.secp256k1 # libsecp256k1.so — required at runtime via ctypes
           ];
           config = {
             Cmd = [
