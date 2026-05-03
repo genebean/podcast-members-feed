@@ -223,14 +223,26 @@ class Secp256k1:
                 "Override: set LIBSECP256K1_PATH=/path/to/libsecp256k1.so"
             )
         self._lib = ctypes.CDLL(lib_path)
+
+        # Set return types explicitly so ctypes handles pointers correctly
+        self._lib.secp256k1_context_create.restype  = ctypes.c_void_p
+        self._lib.secp256k1_context_create.argtypes = [ctypes.c_uint]
+        self._lib.secp256k1_context_randomize.restype  = ctypes.c_int
+        self._lib.secp256k1_context_randomize.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p
+        ]
+
         # Use SECP256K1_CONTEXT_NONE (1) — the sign/verify flag split was
         # deprecated in libsecp256k1 0.4 and removed in later versions.
         self._ctx = self._lib.secp256k1_context_create(
             self.SECP256K1_CONTEXT_NONE
         )
-        self._lib.secp256k1_context_randomize(
-            self._ctx, ctypes.c_char_p(os.urandom(32))
-        )
+        if not self._ctx:
+            raise RuntimeError("secp256k1_context_create returned NULL")
+
+        seed = os.urandom(32)
+        if not self._lib.secp256k1_context_randomize(self._ctx, seed):
+            raise RuntimeError("secp256k1_context_randomize failed")
 
     def derive_pubkey(self, privkey: bytes) -> bytes:
         """Return 32-byte x-only public key from 32-byte private key."""
