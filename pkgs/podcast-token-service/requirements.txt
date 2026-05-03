@@ -1,0 +1,14 @@
+# For the Docker / Umbrel VPS path.
+# On NixOS, dependencies are managed by the Nix derivation instead.
+#
+# Requires libsecp256k1 to be installed as a system package before pip install:
+#   Debian/Ubuntu: apt install libsecp256k1-dev
+#   Alpine:        apk add secp256k1-dev
+fastapi
+uvicorn[standard]
+aiosqlite
+httpx
+python-dotenv
+cryptography
+cffi
+websockets

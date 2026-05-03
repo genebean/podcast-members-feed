@@ -1,0 +1,84 @@
+name: Container Image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build${{ github.event_name != 'pull_request' && ' and Push' || '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write  # needed to push to ghcr.io
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v14
+
+      - name: Enable Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v8
+        # Caches Nix store paths in GitHub Actions cache.
+        # Dramatically speeds up subsequent builds.
+
+      - name: Build Docker image with Nix
+        run: |
+          nix build .#dockerImage --print-build-logs
+          # The result symlink points at the image tarball
+          echo "IMAGE_PATH=$(readlink -f result)" >> "$GITHUB_ENV"
+
+      - name: Load image into Docker
+        run: docker load < "$IMAGE_PATH"
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            # Tag latest on main branch pushes
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            # Tag with the git tag on releases (e.g. v1.0.0)
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            # Tag with short SHA on all builds for traceability
+            type=sha,format=short
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retag and push image
+        if: github.event_name != 'pull_request'
+        run: |
+          # The Nix-built image is tagged 'podcast-token-service:latest'.
+          # Retag it with each tag from docker/metadata-action and push.
+          while IFS= read -r tag; do
+            docker tag podcast-token-service:latest "$tag"
+            docker push "$tag"
+          done <<< "${{ steps.meta.outputs.tags }}"
+
+      - name: PR build summary (no push)
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "### Build succeeded ✓" >> "$GITHUB_STEP_SUMMARY"
+          echo "Image built successfully. Push skipped for pull requests." \
+            >> "$GITHUB_STEP_SUMMARY"
+          docker images podcast-token-service

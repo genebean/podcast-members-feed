@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "podcast-token-service"
+version = "0.1.0"
+description = "BTCPay subscription to private podcast RSS feed bridge"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "aiosqlite",
+    "httpx",
+    "python-dotenv",
+    "cryptography",
+    "cffi",
+    "websockets",
+]
+
+[project.scripts]
+podcast-token-service = "token_service:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["token_service*"]

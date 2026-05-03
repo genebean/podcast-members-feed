@@ -1,0 +1,22 @@
+# Nix
+result
+result-*
+.direnv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Secrets — never commit these
+.env
+secrets.yaml
+secrets.enc.yaml
+*.age
+
+# Docker
+docker/data/
