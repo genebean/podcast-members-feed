@@ -613,8 +613,8 @@ class Database:
             datetime.now(timezone.utc) - timedelta(days=90)
         ).isoformat()
         result = await self._db.execute(
-            "DELETE FROM tokens WHERE revoked = 1 OR expires_at < ?",
-            (cutoff,),
+            "DELETE FROM tokens WHERE (revoked = 1 AND created_at < ?) OR expires_at < ?",
+            (cutoff, cutoff),
         )
         await self._db.commit()
         logger.info(f"Cleanup: removed {result.rowcount} expired tokens")
@@ -703,7 +703,7 @@ class FeedProxy:
         if (
             self._cache is not None
             and self._cache_time is not None
-            and (now - self._cache_time).seconds < FEED_CACHE_TTL
+            and (now - self._cache_time).total_seconds() < FEED_CACHE_TTL
         ):
             return self._cache
         async with httpx.AsyncClient() as client:
@@ -1210,14 +1210,22 @@ async def get_feed_url(request: Request):
         metrics.nip98_requests_total.labels(result="malformed").inc()
         raise HTTPException(status_code=401, detail="Method mismatch")
 
+    expected_url = f"{FEED_BASE_URL}/api/feed-url"
+    if tags.get("u") != expected_url:
+        metrics.nip98_requests_total.labels(result="malformed").inc()
+        raise HTTPException(status_code=401, detail="URL mismatch")
+
     pubkey = event.get("pubkey", "")
     if not pubkey:
         metrics.nip98_requests_total.labels(result="malformed").inc()
         raise HTTPException(status_code=401, detail="Missing pubkey")
 
     try:
+        expected_id = _event_id_bytes(event).hex()
+        if event.get("id") != expected_id:
+            raise ValueError("Event ID does not match content")
         if not _secp.schnorr_verify(
-            bytes.fromhex(event["id"]),
+            bytes.fromhex(expected_id),
             bytes.fromhex(event["sig"]),
             bytes.fromhex(pubkey),
         ):
