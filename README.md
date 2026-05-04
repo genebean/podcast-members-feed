@@ -11,7 +11,7 @@ private RSS feeds, and a small token service that bridges the two.
 ## Repository layout
 
 ```
-pkgs/podcast-token-service/   Python service + CLI (token_service.py, manage.py)
+pkgs/podcast-token-service/   Python service + CLI (token_service.py, podcast_members_manage.py)
 modules/services/             NixOS module
 nixos-configurations/         Complete example host configuration
 podman/                       Podman Compose setup for Path A (Umbrel + VPS)
