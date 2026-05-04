@@ -321,7 +321,7 @@ class Secp256k1:
 
         HASHFP = ctypes.CFUNCTYPE(
             ctypes.c_int,
-            ctypes.c_char_p, ctypes.c_char_p,
+            ctypes.c_void_p, ctypes.c_char_p,
             ctypes.c_char_p, ctypes.c_void_p,
         )
 
