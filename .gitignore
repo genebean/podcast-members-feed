@@ -20,3 +20,6 @@ secrets.enc.yaml
 
 # Docker
 docker/data/
+
+# Testing dir
+data/

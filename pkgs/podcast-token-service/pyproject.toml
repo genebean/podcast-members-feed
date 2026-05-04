@@ -17,11 +17,12 @@ dependencies = [
     "cffi",
     "websockets",
     "prometheus-client",
+    "requests",
 ]
 
 [project.scripts]
 podcast-token-service  = "token_service:main"
-podcast-members-manage = "manage:main"
+podcast-members-manage = "podcast_members_manage:main"
 
 [tool.setuptools]
-py-modules = ["token_service", "manage"]
+py-modules = ["token_service", "podcast_members_manage"]

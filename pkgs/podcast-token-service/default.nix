@@ -33,6 +33,7 @@ in python3Packages.buildPythonApplication {
     cffi              # ctypes support for libsecp256k1
     websockets        # Nostr relay communication
     prometheus-client # /metrics endpoint
+    requests          # podcast-members-manage test-webhook command
   ];
 
   preBuild = ''
