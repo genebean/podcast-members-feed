@@ -244,8 +244,11 @@ class Secp256k1:
         self._lib.secp256k1_ec_pubkey_serialize.argtypes  = [p, cp, ctypes.POINTER(cs), p, cu]
         self._lib.secp256k1_ec_pubkey_parse.restype       = ci
         self._lib.secp256k1_ec_pubkey_parse.argtypes      = [p, p, cp, cs]
+        self._lib.secp256k1_keypair_create.restype         = ci
+        self._lib.secp256k1_keypair_create.argtypes        = [p, p, cp]
         self._lib.secp256k1_schnorrsig_sign32.restype     = ci
-        self._lib.secp256k1_schnorrsig_sign32.argtypes    = [p, cp, cp, cp, cp]
+        # 4th arg is secp256k1_keypair* (96-byte struct), not a raw privkey
+        self._lib.secp256k1_schnorrsig_sign32.argtypes    = [p, cp, cp, p, cp]
         self._lib.secp256k1_xonly_pubkey_parse.restype    = ci
         self._lib.secp256k1_xonly_pubkey_parse.argtypes   = [p, p, cp]
         self._lib.secp256k1_schnorrsig_verify.restype     = ci
@@ -280,9 +283,12 @@ class Secp256k1:
 
     def schnorr_sign(self, msg32: bytes, privkey: bytes) -> bytes:
         """BIP-340 Schnorr sign. msg32 must be exactly 32 bytes."""
+        keypair = ctypes.create_string_buffer(96)
+        if not self._lib.secp256k1_keypair_create(self._ctx, keypair, privkey):
+            raise ValueError("Invalid private key for keypair creation")
         sig = ctypes.create_string_buffer(64)
         if not self._lib.secp256k1_schnorrsig_sign32(
-            self._ctx, sig, msg32, privkey, os.urandom(32),
+            self._ctx, sig, msg32, keypair, os.urandom(32),
         ):
             raise ValueError("Schnorr signing failed")
         return bytes(sig)
