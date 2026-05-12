@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>podcast-members-feed</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem 4rem;
+      line-height: 1.65;
+      color: #1a1a1a;
+    }
+    a { color: #0066cc; }
+    a:visited { color: #5500aa; }
+    h1 { font-size: 1.8rem; margin-bottom: 0.25rem; }
+    h2 { font-size: 1.25rem; margin-top: 2.5rem; border-bottom: 1px solid #ddd; padding-bottom: 0.3rem; }
+    h3 { font-size: 1.05rem; margin-top: 1.5rem; }
+    .tagline { color: #555; margin-top: 0; font-size: 1.05rem; }
+    nav {
+      display: flex;
+      gap: 1.5rem;
+      margin: 2rem 0;
+      padding: 1rem 1.25rem;
+      background: #f5f5f5;
+      border-radius: 6px;
+      flex-wrap: wrap;
+    }
+    nav a { font-weight: 600; text-decoration: none; }
+    nav a:hover { text-decoration: underline; }
+    code {
+      font-family: ui-monospace, "Cascadia Code", monospace;
+      font-size: 0.9em;
+      background: #f0f0f0;
+      padding: 0.15em 0.35em;
+      border-radius: 3px;
+    }
+    pre {
+      background: #f0f0f0;
+      border-radius: 6px;
+      padding: 1rem 1.25rem;
+      overflow-x: auto;
+      font-size: 0.9rem;
+    }
+    pre code { background: none; padding: 0; }
+    .path-card {
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 1.25rem 1.5rem;
+      margin-top: 1rem;
+    }
+    .path-card h3 { margin-top: 0; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.75rem; }
+    th { background: #f0f0f0; text-align: left; }
+    th, td { padding: 0.45rem 0.75rem; border: 1px solid #ddd; font-size: 0.9rem; }
+    footer {
+      margin-top: 4rem;
+      padding-top: 1rem;
+      border-top: 1px solid #ddd;
+      color: #888;
+      font-size: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+
+<h1>podcast-members-feed</h1>
+<p class="tagline">
+  Self-hosted Bitcoin-native podcast membership — BTCPay Server subscriptions,
+  private RSS feeds, and a token service that bridges the two.
+</p>
+
+<nav>
+  <a href="#deployment">Deployment</a>
+  <a href="#management">Management CLI</a>
+  <a href="#monitoring">Monitoring</a>
+  <a href="reference/spec.html">Technical Reference</a>
+  <a href="https://github.com/genebean/podcast-members-feed">GitHub</a>
+</nav>
+
+<h2 id="overview">How it works</h2>
+<p>
+  When a listener subscribes through BTCPay Server, the token service receives
+  a signed webhook, issues a unique private feed URL, and delivers it via email
+  or Nostr DM. The subscriber adds that URL to any podcast app and gets access
+  to member-only episodes. When the subscription expires or is cancelled, the
+  feed URL stops working automatically.
+</p>
+<pre>
+BTCPay Server
+    │ HMAC-signed webhook
+    ▼
+podcast-token-service
+    │                  │               │
+    ▼                  ▼               ▼
+ SQLite DB      PodServer feed    Nostr relays / SMTP
+(tokens.db)    (upstream proxy)   (notifications)
+</pre>
+
+<h2 id="deployment">Deployment</h2>
+
+<div class="path-card">
+  <h3>Path A — Umbrel + VPS</h3>
+  <p>
+    BTCPay, LND, and Alby Hub run on Umbrel. The token service runs as a
+    Podman container on a small VPS connected via Tailscale.
+  </p>
+  <pre><code>git clone https://github.com/genebean/podcast-members-feed.git
+cd podcast-members-feed/podman
+cp .env.example .env
+# Edit .env with your values
+podman pull ghcr.io/genebean/podcast-members-feed:latest
+podman compose up -d</code></pre>
+</div>
+
+<div class="path-card">
+  <h3>Path B — NixOS (fully declarative)</h3>
+  <p>Add as a flake input:</p>
+  <pre><code>inputs = {
+  podcast-members-feed.url = "github:genebean/podcast-members-feed";
+  nixpkgs.follows          = "podcast-members-feed/nixpkgs";
+};</code></pre>
+  <p>Import the module and enable the service:</p>
+  <pre><code>imports = [ podcast-members-feed.nixosModules.podcast-token-service ];
+
+services.podcastTokenService = {
+  enable          = true;
+  package         = pkgs.podcast-token-service;
+  environmentFile = config.sops.secrets."podcast-token-service-env".path;
+};</code></pre>
+  <p>
+    See <code>nixos-configurations/example-host/configuration.nix</code> for a
+    complete example including nix-bitcoin, Alby Hub, nginx, TLS, Tailscale,
+    and sops-nix.
+  </p>
+</div>
+
+<h2 id="environment">Environment variables</h2>
+<table>
+  <tr><th>Variable</th><th>Required</th><th>Description</th></tr>
+  <tr><td><code>BTCPAY_WEBHOOK_SECRET</code></td><td>✓</td><td>HMAC-SHA256 shared secret from BTCPay webhook settings</td></tr>
+  <tr><td><code>PODSERVER_FEED_URL</code></td><td>✓</td><td>Internal URL of the PodServer members RSS feed</td></tr>
+  <tr><td><code>FEED_BASE_URL</code></td><td>✓</td><td>Public base URL for subscriber feed URLs and /recover</td></tr>
+  <tr><td><code>ADMIN_TOKEN</code></td><td>✓</td><td>Bearer token for /metrics and /admin/ endpoints</td></tr>
+  <tr><td><code>NOSTR_PRIVATE_KEY</code></td><td>✓</td><td>Service Nostr keypair: nsec bech32 or 32-byte hex</td></tr>
+  <tr><td><code>DATABASE_PATH</code></td><td></td><td>Path to SQLite database (default: <code>tokens.db</code>)</td></tr>
+  <tr><td><code>EXPIRED_AUDIO_URL</code></td><td></td><td>URL of pre-recorded expiry audio clip (optional)</td></tr>
+  <tr><td><code>SMTP_HOST</code></td><td></td><td>SMTP server (omit to disable email)</td></tr>
+  <tr><td><code>SMTP_PORT</code></td><td></td><td>SMTP port (default: 587)</td></tr>
+  <tr><td><code>SMTP_USER</code></td><td></td><td>SMTP username</td></tr>
+  <tr><td><code>SMTP_PASSWORD</code></td><td></td><td>SMTP password</td></tr>
+  <tr><td><code>SMTP_FROM</code></td><td></td><td>Sender address for outgoing email</td></tr>
+</table>
+
+<h2 id="management">Management CLI</h2>
+<p>
+  The <code>podcast-members-manage</code> command reads the SQLite database
+  directly and is installed alongside the service binary.
+</p>
+<table>
+  <tr><th>Command</th><th>Description</th></tr>
+  <tr><td><code>stats</code></td><td>Print counts: total subscribers, active tokens, never-accessed, expired-unnotified</td></tr>
+  <tr><td><code>subscribers</code></td><td>List subscribers. Flags: <code>--active</code>, <code>--never-accessed</code>, <code>--expiring-days N</code></td></tr>
+  <tr><td><code>feed-url</code></td><td>Print feed URL for a subscriber. Lookup by <code>--email</code> or <code>--npub</code></td></tr>
+  <tr><td><code>revoke &lt;id&gt;</code></td><td>Revoke all tokens for a BTCPay subscriber ID (prompts unless <code>--yes</code>)</td></tr>
+  <tr><td><code>cleanup</code></td><td>POST to <code>/admin/cleanup</code> on the running service (requires <code>ADMIN_TOKEN</code>)</td></tr>
+  <tr><td><code>test-webhook</code></td><td>End-to-end service validation: health, metrics, webhook, feed proxy, expiry flow</td></tr>
+</table>
+
+<h3>Example usage — NixOS</h3>
+<pre><code>podcast-members-manage stats
+podcast-members-manage subscribers --active
+podcast-members-manage subscribers --expiring-days 7
+podcast-members-manage feed-url --email subscriber@example.com
+podcast-members-manage revoke &lt;btcpay-subscriber-id&gt;</code></pre>
+
+<h3>Example usage — Podman (Path A)</h3>
+<pre><code>podman exec podcast-token-service \
+  podcast-members-manage \
+  --db /var/lib/podcast-token-service/tokens.db \
+  stats</code></pre>
+
+<h2 id="monitoring">Monitoring</h2>
+<p>
+  Prometheus metrics are available at <code>/metrics</code> with bearer token
+  auth. AlertManager rules are in
+  <code>alerts/podcast-members-feed.rules.yml</code>.
+</p>
+<pre><code># prometheus.yml scrape config
+- job_name: podcast_token_service
+  bearer_token: YOUR_ADMIN_TOKEN
+  static_configs:
+    - targets: ["members.yourpodcast.com"]
+  scheme: https</code></pre>
+
+<h2 id="building">Building the container locally</h2>
+<pre><code>nix build .#dockerImage
+podman load &lt; result
+podman run --rm -p 8765:8765 \
+  --env-file podman/.env \
+  localhost/podcast-token-service:latest</code></pre>
+
+<footer>
+  <a href="https://github.com/genebean/podcast-members-feed">github.com/genebean/podcast-members-feed</a>
+  &nbsp;·&nbsp;
+  <a href="reference/spec.html">Technical Reference</a>
+  &nbsp;·&nbsp;
+  MIT License
+</footer>
+
+</body>
+</html>

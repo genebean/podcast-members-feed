@@ -71,9 +71,14 @@ var (
 )
 
 const (
-	tokenBytes      = 32
+	tokenBytes = 32
+	// feedCacheTTL is how long the upstream RSS feed response is cached in memory.
+	// Reduces load on PodServer; all subscribers share one cached copy.
+	feedCacheTTL = 5 * time.Minute
+	// gracePeriodDays is how many days past expires_at a subscriber still receives
+	// the normal feed before the expiry notice episode is injected.
+	// This prevents cutting off subscribers the instant their billing cycle turns over.
 	gracePeriodDays = 3
-	feedCacheTTL    = 5 * time.Minute
 )
 
 var nostrRelays = []string{
@@ -342,6 +347,9 @@ func (n *nostrDM) send(ctx context.Context, recipientRaw, message string) error 
 		}
 	}
 
+	// nip04.ComputeSharedSecret signature is (pub, sk) — public key first, private key second.
+	// Swapping these produces a "not on the secp256k1 curve" error because the library
+	// prepends "02" to its first argument assuming it is an x-only public key.
 	sharedSecret, err := nip04.ComputeSharedSecret(recipientHex, n.privkeyHex)
 	if err != nil {
 		return fmt.Errorf("compute shared secret: %w", err)
@@ -394,6 +402,9 @@ func (n *nostrDM) send(ctx context.Context, recipientRaw, message string) error 
 }
 
 func publishToRelay(ctx context.Context, relayURL string, ev nostr.Event) bool {
+	// Two separate timeouts: one for the TCP+WebSocket handshake, one for the
+	// actual publish. A relay can accept the connection and then stall on the
+	// publish, so a single timeout on the outer context is not sufficient.
 	connectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -523,6 +534,9 @@ func generateToken() (string, error) {
 
 // ─── Admin auth helper ────────────────────────────────────────────────────────
 
+// requireAdmin checks the Authorization header for a valid bearer token.
+// hmac.Equal is used for constant-time comparison to prevent timing attacks
+// that could reveal the token through response latency differences.
 func requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
@@ -634,7 +648,10 @@ func handleCreated(ctx context.Context, database *db.DB, n *notifier, subscriber
 		return err
 	}
 	feedURL := feedBaseURL + "/rss/" + token + ".xml"
-	// Notification failure must not crash the webhook handler.
+	// Fire notifications in a detached goroutine with context.Background() so
+	// they are not cancelled when the HTTP request ends. Failure is logged but
+	// must not cause an error response to BTCPay — a 4xx/5xx would make BTCPay
+	// retry the webhook and issue a duplicate token.
 	go n.deliver(context.Background(), subscriberInfo{
 		feedURL:     feedURL,
 		email:       email.String,
@@ -651,6 +668,9 @@ func handleRenewed(ctx context.Context, database *db.DB, n *notifier, subscriber
 		return err
 	}
 	if existing != "" {
+		// Extend in-place rather than issuing a new token. Podcast apps cache feed
+		// URLs, so replacing the token would silently break any subscriber whose app
+		// hasn't re-fetched their URL since the renewal.
 		if err := database.ExtendToken(ctx, subscriberID, expiresAt); err != nil {
 			return err
 		}
@@ -705,7 +725,11 @@ func feedHandler(database *db.DB, proxy *feedProxy, n *notifier) http.HandlerFun
 		}
 
 		now := time.Now().UTC()
-		isExpired := row.ExpiresAt.Before(now)
+		// Give the subscriber a grace period after their expiry date before
+		// cutting them off. This covers billing-cycle timing gaps and avoids
+		// surprising a subscriber who renewed moments after midnight.
+		graceDeadline := row.ExpiresAt.Add(gracePeriodDays * 24 * time.Hour)
+		isExpired := graceDeadline.Before(now)
 
 		if isExpired {
 			if row.ExpiryNotifiedAt.Valid {
