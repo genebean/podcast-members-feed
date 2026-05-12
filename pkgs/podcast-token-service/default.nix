@@ -1,49 +1,23 @@
 { lib
-, python3Packages
-, pkg-config
-, secp256k1
+, buildGoModule
 }:
 
-let
-  # Bundle the CLI tool alongside the main service in the same derivation.
-  # Both are installed as scripts: podcast-token-service and podcast-members-manage.
-  combinedSrc = ./.;
-in python3Packages.buildPythonApplication {
+buildGoModule {
   pname   = "podcast-token-service";
   version = "0.1.0";
-  src     = combinedSrc;
-  format  = "pyproject";
 
-  nativeBuildInputs = [
-    pkg-config
-    python3Packages.setuptools
+  # Source is the repository root — go.mod lives there.
+  src = ../..;
+
+  # vendorHash = null tells buildGoModule to use the committed vendor/ directory.
+  # Run `go mod vendor` and commit the result after any dependency change.
+  vendorHash = null;
+
+  # Build both binaries from their respective cmd/ packages.
+  subPackages = [
+    "cmd/podcast-token-service"
+    "cmd/podcast-members-manage"
   ];
-
-  # libsecp256k1 is used via ctypes for Schnorr signing/verification and
-  # raw ECDH. All other dependencies are pure Python available in nixpkgs.
-  buildInputs = [ secp256k1 ];
-
-  propagatedBuildInputs = with python3Packages; [
-    fastapi
-    uvicorn
-    aiosqlite
-    httpx
-    python-dotenv
-    cryptography      # AES-CBC for NIP-04 message encryption
-    cffi              # ctypes support for libsecp256k1
-    websockets        # Nostr relay communication
-    prometheus-client # /metrics endpoint
-    requests          # podcast-members-manage test-webhook command
-  ];
-
-  preBuild = ''
-    export PKG_CONFIG_PATH="${secp256k1}/lib/pkgconfig"
-  '';
-
-  # Import check skipped — token_service imports FastAPI and other deps
-  # at module level, causing false failures during the check phase.
-  # Runtime availability is guaranteed via propagatedBuildInputs.
-  pythonImportsCheck = [];
 
   meta = {
     description = "BTCPay subscription webhook to private podcast RSS feed bridge";
@@ -54,8 +28,11 @@ in python3Packages.buildPythonApplication {
       exposes Prometheus metrics for monitoring and alerting.
 
       Installs two commands:
-        podcast-token-service   - the FastAPI service
-        podcast-members-manage  - management CLI
+        podcast-token-service   - the HTTP service (listen on 127.0.0.1:8765)
+        podcast-members-manage  - management and testing CLI
+
+      Pure Go — no libsecp256k1 or other native library dependency.
+      Nostr cryptography is handled by github.com/nbd-wtf/go-nostr.
     '';
     license   = lib.licenses.mit;
     platforms = lib.platforms.linux;
