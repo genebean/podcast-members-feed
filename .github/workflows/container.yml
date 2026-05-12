@@ -15,9 +15,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v14
+
+      - name: Enable Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v8
+
+      - name: Run tests
+        # Go is provided by the flake devShell — not installed on the host.
+        run: nix develop --command go test ./...
+
   build:
     name: Build${{ github.event_name != 'pull_request' && ' and Push' || '' }}
     runs-on: ubuntu-latest
+    needs: test
     permissions:
       contents: read
       packages: write  # needed to push to ghcr.io

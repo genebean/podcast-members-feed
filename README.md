@@ -11,13 +11,44 @@ private RSS feeds, and a small token service that bridges the two.
 ## Repository layout
 
 ```
-pkgs/podcast-token-service/   Python service + CLI (token_service.py, podcast_members_manage.py)
+cmd/podcast-token-service/    Go HTTP service (main binary)
+cmd/podcast-members-manage/   Go management CLI
+internal/db/                  Shared SQLite database layer
+pkgs/podcast-token-service/   Nix derivation (buildGoModule)
 modules/services/             NixOS module
 nixos-configurations/         Complete example host configuration
 podman/                       Podman Compose setup for Path A (Umbrel + VPS)
 alerts/                       Prometheus/AlertManager rules
-.github/workflows/            GitHub Actions: build and push container image
+.github/workflows/            GitHub Actions: test, build, and push container image
+SPEC.md                       Full service specification and endpoint reference
 ```
+
+## Development
+
+Go is not required on the host. The flake provides a `devShell` with the Go
+toolchain, language server, and linter:
+
+```bash
+nix develop          # enter the dev shell
+go test ./...        # run all tests
+go build ./...       # build both binaries
+```
+
+Or run a single command without entering the shell:
+
+```bash
+nix develop --command go test ./...
+```
+
+**Dependency management** — when adding or updating Go dependencies:
+```bash
+nix develop --command go get github.com/some/package
+nix develop --command go mod tidy
+nix develop --command go mod vendor   # update the committed vendor/ directory
+```
+
+The `vendor/` directory is committed so the Nix build (`buildGoModule` with
+`vendorHash = null`) does not need network access.
 
 ## Deployment paths
 
@@ -131,12 +162,6 @@ podman run --rm -p 8765:8765 \
   --env-file podman/.env \
   podcast-token-service:latest
 ```
-
-## Requirements
-
-`libsecp256k1` must be available as a system library:
-- NixOS: provided by `pkgs.secp256k1` via the derivation
-- The Podman image handles this automatically
 
 ## License
 
