@@ -65,7 +65,9 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
-	// SQLite supports one concurrent writer; serialise all access.
+	// SQLite supports only one concurrent writer. Limiting to one connection
+	// serialises all reads and writes through a single handle, which prevents
+	// "database is locked" errors under concurrent HTTP requests.
 	conn.SetMaxOpenConns(1)
 	d := &DB{conn: conn}
 	if err := d.init(context.Background()); err != nil {

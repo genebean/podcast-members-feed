@@ -388,6 +388,33 @@ func TestFeedEndpointInvalidToken(t *testing.T) {
 	}
 }
 
+func TestFeedEndpointGracePeriod(t *testing.T) {
+	handler, database := setupService(t)
+	ctx := context.Background()
+
+	_ = database.UpsertSubscriber(ctx, "sub-grace",
+		sql.NullString{String: "grace@example.com", Valid: true},
+		sql.NullString{},
+	)
+	// Expired 1 day ago — still within the 3-day grace period.
+	expiry := time.Now().UTC().Add(-1 * 24 * time.Hour)
+	_ = database.CreateToken(ctx, "sub-grace", "grace-token", expiry)
+
+	req := httptest.NewRequest(http.MethodGet, "/rss/grace-token.xml", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("grace period: want 200, got %d", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "Your subscription has expired") {
+		t.Error("grace period: expiry notice must not appear during grace period")
+	}
+	if !strings.Contains(w.Body.String(), "<channel>") {
+		t.Error("grace period: response should be normal RSS feed")
+	}
+}
+
 func TestFeedEndpointExpiryFlow(t *testing.T) {
 	handler, database := setupService(t)
 	ctx := context.Background()
@@ -396,7 +423,7 @@ func TestFeedEndpointExpiryFlow(t *testing.T) {
 		sql.NullString{String: "exp@example.com", Valid: true},
 		sql.NullString{},
 	)
-	expiry := time.Now().UTC().Add(-1 * time.Hour) // already expired
+	expiry := time.Now().UTC().Add(-4 * 24 * time.Hour) // expired 4 days ago, past the 3-day grace period
 	_ = database.CreateToken(ctx, "sub-exp", "expired-token", expiry)
 
 	// First request: should inject expiry notice

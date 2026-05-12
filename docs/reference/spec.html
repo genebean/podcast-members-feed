@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Technical Reference — podcast-members-feed</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem 4rem;
+      line-height: 1.65;
+      color: #1a1a1a;
+    }
+    a { color: #0066cc; }
+    a:visited { color: #5500aa; }
+    h1 { font-size: 1.8rem; margin-bottom: 0.25rem; }
+    h2 {
+      font-size: 1.25rem;
+      margin-top: 2.75rem;
+      border-bottom: 2px solid #ddd;
+      padding-bottom: 0.35rem;
+    }
+    h3 { font-size: 1.05rem; margin-top: 1.75rem; color: #333; }
+    .subtitle { color: #555; margin-top: 0; }
+    nav {
+      display: flex;
+      gap: 1.25rem;
+      margin: 1.5rem 0 2rem;
+      padding: 0.75rem 1rem;
+      background: #f5f5f5;
+      border-radius: 6px;
+      flex-wrap: wrap;
+      font-size: 0.9rem;
+    }
+    nav a { font-weight: 600; text-decoration: none; }
+    nav a:hover { text-decoration: underline; }
+    code {
+      font-family: ui-monospace, "Cascadia Code", monospace;
+      font-size: 0.875em;
+      background: #f0f0f0;
+      padding: 0.15em 0.35em;
+      border-radius: 3px;
+    }
+    pre {
+      background: #f0f0f0;
+      border-radius: 6px;
+      padding: 1rem 1.25rem;
+      overflow-x: auto;
+      font-size: 0.875rem;
+      line-height: 1.5;
+    }
+    pre code { background: none; padding: 0; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.75rem; font-size: 0.9rem; }
+    th { background: #f0f0f0; text-align: left; }
+    th, td { padding: 0.45rem 0.75rem; border: 1px solid #ddd; vertical-align: top; }
+    .endpoint {
+      margin-top: 2rem;
+      border-left: 3px solid #0066cc;
+      padding-left: 1.25rem;
+    }
+    .endpoint h3 { margin-top: 0.5rem; }
+    .method {
+      display: inline-block;
+      font-family: ui-monospace, monospace;
+      font-size: 0.85rem;
+      font-weight: 700;
+      background: #0066cc;
+      color: white;
+      padding: 0.1em 0.5em;
+      border-radius: 3px;
+      margin-right: 0.4em;
+    }
+    .method.post { background: #228b22; }
+    footer {
+      margin-top: 4rem;
+      padding-top: 1rem;
+      border-top: 1px solid #ddd;
+      color: #888;
+      font-size: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Technical Reference</h1>
+<p class="subtitle">podcast-members-feed — service specification and architecture</p>
+
+<nav>
+  <a href="../index.html">← Back to docs</a>
+  <a href="#purpose">Purpose</a>
+  <a href="#architecture">Architecture</a>
+  <a href="#schema">Database schema</a>
+  <a href="#environment">Environment</a>
+  <a href="#endpoints">Endpoints</a>
+  <a href="#notifications">Notifications</a>
+  <a href="#nostr">Nostr integration</a>
+  <a href="#cli">CLI reference</a>
+  <a href="#security">Security</a>
+</nav>
+
+<!-- ─── Purpose ─────────────────────────────────────────────────────────── -->
+
+<h2 id="purpose">Purpose</h2>
+<p>
+  The podcast token service bridges BTCPay Server subscription webhooks to
+  private RSS feed access. When a subscriber pays through BTCPay, the service
+  issues them a unique token-bearing feed URL. The subscriber adds that URL to
+  any podcast app and gets access to member-only episodes. When the
+  subscription expires or is cancelled, access is cut off automatically.
+</p>
+
+<!-- ─── Architecture ─────────────────────────────────────────────────────── -->
+
+<h2 id="architecture">Architecture</h2>
+<pre>
+BTCPay Server
+    │ HMAC-signed webhook
+    ▼
+podcast-token-service (Go, net/http + chi)
+    │                  │               │
+    ▼                  ▼               ▼
+ SQLite DB      PodServer feed    Nostr relays / SMTP
+(tokens.db)    (upstream proxy)   (notifications)
+</pre>
+<ul>
+  <li>
+    <strong>No native library dependencies.</strong> Nostr cryptography
+    (Schnorr signing, NIP-04 ECDH) is provided by
+    <code>github.com/nbd-wtf/go-nostr</code> in pure Go.
+    <code>libsecp256k1</code> is not required.
+  </li>
+  <li>
+    <strong>Single SQLite file</strong> stores all subscribers and tokens.
+    Concurrent access is serialised via <code>SetMaxOpenConns(1)</code>.
+  </li>
+  <li>
+    <strong>No framework beyond chi.</strong> Business logic is in plain Go
+    functions, making it easy to unit-test handlers directly without mocking
+    HTTP layers.
+  </li>
+</ul>
+
+<!-- ─── Database schema ───────────────────────────────────────────────────── -->
+
+<h2 id="schema">Database schema</h2>
+<pre><code>CREATE TABLE subscribers (
+    btcpay_subscriber_id  TEXT PRIMARY KEY,
+    email                 TEXT,
+    nostr_pubkey          TEXT,
+    created_at            TEXT NOT NULL,
+    -- at least one contact method required
+    CHECK (email IS NOT NULL OR nostr_pubkey IS NOT NULL)
+);
+
+CREATE TABLE tokens (
+    token                 TEXT PRIMARY KEY,
+    btcpay_subscriber_id  TEXT NOT NULL REFERENCES subscribers,
+    expires_at            TEXT NOT NULL,    -- RFC3339Nano UTC
+    created_at            TEXT NOT NULL,
+    last_used_at          TEXT,
+    revoked               INTEGER NOT NULL DEFAULT 0,
+    expiry_notified_at    TEXT              -- set after injecting expiry episode
+);
+
+CREATE INDEX idx_tokens_subscriber ON tokens(btcpay_subscriber_id);</code></pre>
+<p>
+  <code>expiry_notified_at</code> records when the one-time expiry audio
+  episode was served. Once set, subsequent feed requests for that token return
+  402.
+</p>
+
+<!-- ─── Token format ───────────────────────────────────────────────────────── -->
+
+<h2 id="token-format">Token format</h2>
+<p>
+  Tokens are 32 random bytes encoded as URL-safe base64 without padding (43
+  characters), matching Python's <code>secrets.token_urlsafe(32)</code> output
+  format for database compatibility.
+</p>
+
+<!-- ─── Environment variables ─────────────────────────────────────────────── -->
+
+<h2 id="environment">Environment variables</h2>
+<table>
+  <tr><th>Variable</th><th>Required</th><th>Default</th><th>Description</th></tr>
+  <tr><td><code>BTCPAY_WEBHOOK_SECRET</code></td><td>✓</td><td>—</td><td>HMAC-SHA256 shared secret from BTCPay webhook settings</td></tr>
+  <tr><td><code>PODSERVER_FEED_URL</code></td><td>✓</td><td>—</td><td>Internal URL of the PodServer members RSS feed</td></tr>
+  <tr><td><code>FEED_BASE_URL</code></td><td>✓</td><td>—</td><td>Public base URL for subscriber feed URLs and /recover</td></tr>
+  <tr><td><code>ADMIN_TOKEN</code></td><td>✓</td><td>—</td><td>Bearer token for /metrics and /admin/ endpoints</td></tr>
+  <tr><td><code>NOSTR_PRIVATE_KEY</code></td><td>✓</td><td>—</td><td>Service Nostr keypair: nsec bech32 or 32-byte hex</td></tr>
+  <tr><td><code>DATABASE_PATH</code></td><td></td><td><code>tokens.db</code></td><td>Path to SQLite database file</td></tr>
+  <tr><td><code>EXPIRED_AUDIO_URL</code></td><td></td><td>—</td><td>URL of pre-recorded expiry audio clip (optional)</td></tr>
+  <tr><td><code>SMTP_HOST</code></td><td></td><td>—</td><td>SMTP server (omit to disable email delivery)</td></tr>
+  <tr><td><code>SMTP_PORT</code></td><td></td><td>587</td><td>SMTP port</td></tr>
+  <tr><td><code>SMTP_USER</code></td><td></td><td>—</td><td>SMTP username</td></tr>
+  <tr><td><code>SMTP_PASSWORD</code></td><td></td><td>—</td><td>SMTP password</td></tr>
+  <tr><td><code>SMTP_FROM</code></td><td></td><td>—</td><td>Sender address for outgoing email</td></tr>
+</table>
+<p>
+  If <code>SMTP_HOST</code> is empty, email delivery is skipped silently. At
+  least one of SMTP or Nostr must be configured — the database constraint
+  enforces a contact method per subscriber.
+</p>
+
+<!-- ─── HTTP Endpoints ───────────────────────────────────────────────────── -->
+
+<h2 id="endpoints">HTTP endpoints</h2>
+
+<div class="endpoint">
+  <span class="method post">POST</span> <code>/webhook/btcpay</code>
+  <h3>BTCPay subscription webhook</h3>
+  <p>
+    Receives BTCPay Server subscription lifecycle events.
+  </p>
+  <p>
+    <strong>Authentication:</strong> <code>BTCPay-Sig</code> header —
+    <code>sha256=&lt;HMAC-SHA256-hex&gt;</code> of the request body, keyed
+    with <code>BTCPAY_WEBHOOK_SECRET</code>.
+  </p>
+  <p><strong>Request body (JSON from BTCPay):</strong></p>
+  <pre><code>{
+  "type": "SubscriptionCreated",
+  "subscriberId": "btcpay-sub-id",
+  "email": "user@example.com",
+  "subscription": { "expiresAt": 1750000000 },
+  "metadata": { "nostrPubkey": "hex-or-npub" }
+}</code></pre>
+  <p><strong>Handled event types:</strong></p>
+  <table>
+    <tr><th>Event</th><th>Action</th></tr>
+    <tr><td><code>SubscriptionCreated</code></td><td>Upsert subscriber, create token, deliver feed URL via email + Nostr DM</td></tr>
+    <tr><td><code>SubscriptionRenewed</code></td><td>Extend expiry on active token; if no active token exists, issue a new one</td></tr>
+    <tr><td><code>SubscriptionExpired</code></td><td>Revoke all tokens</td></tr>
+    <tr><td><code>SubscriptionSuspended</code></td><td>Revoke all tokens</td></tr>
+  </table>
+  <p>
+    Notification failures do not crash the handler — the token is already
+    written and BTCPay must not be signalled to retry (which would create
+    duplicate tokens).
+  </p>
+  <p><strong>Response:</strong> <code>{"status":"ok"}</code> on success;
+  <code>{"status":"ignored","reason":"..."}</code> when subscriberId is absent.</p>
+</div>
+
+<div class="endpoint">
+  <span class="method">GET</span> <code>/rss/{token}.xml</code>
+  <h3>Members RSS feed</h3>
+  <p>Returns the members RSS feed for a valid token.</p>
+  <table>
+    <tr><th>Condition</th><th>Response</th></tr>
+    <tr><td>Token unknown or revoked</td><td><code>402</code> — Subscription required or expired.</td></tr>
+    <tr><td>Token valid, not expired</td><td><code>200</code> — upstream feed proxied (5-minute in-memory cache)</td></tr>
+    <tr><td>Token past <code>expires_at</code> but within 3-day grace period</td><td><code>200</code> — upstream feed proxied normally</td></tr>
+    <tr><td>Token past grace period, first request</td><td><code>200</code> — upstream feed with a synthetic expiry episode prepended; <code>expiry_notified_at</code> set; optional Nostr DM sent</td></tr>
+    <tr><td>Token past grace period, subsequent requests</td><td><code>402</code> — Subscription expired.</td></tr>
+  </table>
+  <p>The injected expiry episode contains:</p>
+  <ul>
+    <li>Title: <em>Your subscription has expired</em></li>
+    <li>Description: instructions to renew</li>
+    <li>PubDate: current time</li>
+    <li>Guid: <code>expired-notice-&lt;unix-timestamp&gt;</code> (not a permalink)</li>
+    <li>Enclosure: <code>EXPIRED_AUDIO_URL</code> if configured</li>
+  </ul>
+</div>
+
+<div class="endpoint">
+  <span class="method">GET</span> <code>/api/feed-url</code>
+  <h3>Feed URL self-service retrieval (NIP-98)</h3>
+  <p>
+    Returns the subscriber's feed URL given a valid NIP-98 HTTP Auth event.
+    Used by the <code>/recover</code> page.
+  </p>
+  <p><strong>Authentication:</strong> <code>Authorization: Nostr &lt;base64(JSON event)&gt;</code></p>
+  <p><strong>NIP-98 verification steps:</strong></p>
+  <ol>
+    <li>Decode base64 event JSON from header</li>
+    <li><code>kind</code> must be <code>27235</code></li>
+    <li><code>created_at</code> must be within 60 seconds of server time (replay prevention)</li>
+    <li><code>tags</code> must contain <code>["u", "&lt;FEED_BASE_URL&gt;/api/feed-url"]</code></li>
+    <li><code>tags</code> must contain <code>["method", "GET"]</code></li>
+    <li>Event ID and Schnorr signature must be valid</li>
+  </ol>
+  <p><strong>Response on success:</strong> <code>{"feed_url":"https://members.example.com/rss/&lt;token&gt;.xml"}</code></p>
+  <p><strong>Error codes:</strong> <code>401</code> — auth issues; <code>404</code> — no active subscription for that pubkey.</p>
+</div>
+
+<div class="endpoint">
+  <span class="method">GET</span> <code>/recover</code>
+  <h3>Self-service feed URL recovery page</h3>
+  <p>
+    HTML page for subscribers to retrieve their feed URL via a NIP-07 browser
+    extension (Alby, nos2x). JavaScript calls
+    <code>window.nostr.signEvent()</code> to produce a NIP-98 event, then
+    fetches <code>/api/feed-url</code>. Mobile users without extension support
+    are directed to the email fallback.
+  </p>
+</div>
+
+<div class="endpoint">
+  <span class="method">GET</span> <code>/metrics</code>
+  <h3>Prometheus metrics</h3>
+  <p><strong>Authentication:</strong> <code>Authorization: Bearer &lt;ADMIN_TOKEN&gt;</code></p>
+  <table>
+    <tr><th>Metric</th><th>Type</th><th>Description</th></tr>
+    <tr><td><code>podcast_active_tokens</code></td><td>Gauge</td><td>Non-revoked, non-expired tokens</td></tr>
+    <tr><td><code>podcast_total_subscribers</code></td><td>Gauge</td><td>Total subscribers ever registered</td></tr>
+    <tr><td><code>podcast_webhooks_total{event_type}</code></td><td>Counter</td><td>Successfully processed webhooks</td></tr>
+    <tr><td><code>podcast_webhook_errors_total{reason}</code></td><td>Counter</td><td>Webhook processing errors</td></tr>
+    <tr><td><code>podcast_feed_requests_total{result}</code></td><td>Counter</td><td>Feed requests by result (valid/expired/upstream_error)</td></tr>
+    <tr><td><code>podcast_feed_upstream_errors_total</code></td><td>Counter</td><td>Failures fetching upstream PodServer feed</td></tr>
+    <tr><td><code>podcast_expiry_notifications_total</code></td><td>Counter</td><td>Expiry episodes injected</td></tr>
+    <tr><td><code>podcast_nostr_dm_total{result}</code></td><td>Counter</td><td>Nostr DM delivery attempts</td></tr>
+    <tr><td><code>podcast_nostr_dm_relay_total{relay,result}</code></td><td>Counter</td><td>Per-relay publish results</td></tr>
+    <tr><td><code>podcast_email_total{result}</code></td><td>Counter</td><td>Email delivery attempts</td></tr>
+    <tr><td><code>podcast_nip98_requests_total{result}</code></td><td>Counter</td><td>NIP-98 feed-url requests</td></tr>
+    <tr><td><code>podcast_recovery_page_visits_total</code></td><td>Counter</td><td>/recover page visits</td></tr>
+  </table>
+</div>
+
+<div class="endpoint">
+  <span class="method post">POST</span> <code>/admin/cleanup</code>
+  <h3>Token cleanup</h3>
+  <p>
+    Deletes tokens that were revoked or expired more than 90 days ago.
+  </p>
+  <p><strong>Authentication:</strong> <code>Authorization: Bearer &lt;ADMIN_TOKEN&gt;</code></p>
+  <p>
+    Intended to be called by a weekly cron/timer. Not exposed via nginx — call
+    directly on the host:
+  </p>
+  <pre><code>curl -sf -X POST \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://127.0.0.1:8765/admin/cleanup</code></pre>
+</div>
+
+<div class="endpoint">
+  <span class="method">GET</span> <code>/health</code>
+  <h3>Health check</h3>
+  <p>
+    Returns <code>{"status":"ok"}</code> with HTTP 200. Used by container
+    healthchecks and load balancer probes.
+  </p>
+</div>
+
+<!-- ─── Notification flow ─────────────────────────────────────────────────── -->
+
+<h2 id="notifications">Notification flow</h2>
+
+<h3>On SubscriptionCreated (or lapsed re-subscription)</h3>
+<ol>
+  <li>Token written to database</li>
+  <li>Feed URL constructed: <code>{FEED_BASE_URL}/rss/{token}.xml</code></li>
+  <li>Email sent via SMTP (if <code>SMTP_HOST</code> set and subscriber has email)</li>
+  <li>Nostr NIP-04 DM sent to subscriber's npub (if provided), published to all
+      four configured relays concurrently with a 5-second per-relay timeout</li>
+</ol>
+<p>
+  Notifications run in a detached goroutine with <code>context.Background()</code>
+  so they are not cancelled when the HTTP request ends. Failure is logged but
+  does not cause BTCPay to retry (which would create a duplicate token).
+</p>
+
+<h3>On first feed access after expiry</h3>
+<ol>
+  <li>Expiry episode injected into feed response</li>
+  <li><code>expiry_notified_at</code> written to database (prevents repeat injections)</li>
+  <li>Nostr DM sent with renewal instructions (fire-and-forget goroutine)</li>
+</ol>
+
+<!-- ─── Nostr integration ─────────────────────────────────────────────────── -->
+
+<h2 id="nostr">Nostr integration</h2>
+<table>
+  <tr><th>Aspect</th><th>Detail</th></tr>
+  <tr><td>Key format</td><td><code>NOSTR_PRIVATE_KEY</code> accepts nsec bech32 or raw 32-byte hex</td></tr>
+  <tr><td>Encryption</td><td>NIP-04 (AES-256-CBC + ECDH x-coordinate shared secret)</td></tr>
+  <tr><td>Signing</td><td>BIP-340 Schnorr via <code>github.com/nbd-wtf/go-nostr</code></td></tr>
+  <tr><td>Relays</td><td>Four hardcoded relays: Damus, nos.lol, Primal, nostr.data.haus</td></tr>
+  <tr><td>Publishing</td><td>Goroutines per relay, 5-second connect + 5-second publish timeout each</td></tr>
+  <tr><td>Success threshold</td><td>At least one relay must accept the event</td></tr>
+</table>
+
+<!-- ─── CLI reference ────────────────────────────────────────────────────── -->
+
+<h2 id="cli">CLI — <code>podcast-members-manage</code></h2>
+<p>
+  Reads the SQLite database directly. All subcommands share a
+  <code>--db PATH</code> flag (default: <code>$DATABASE_PATH</code> or
+  <code>/var/lib/podcast-token-service/tokens.db</code>).
+</p>
+<table>
+  <tr><th>Command</th><th>Description</th></tr>
+  <tr><td><code>subscribers</code></td><td>List all subscribers with token status. Filters: <code>--active</code>, <code>--never-accessed</code>, <code>--expiring-days N</code></td></tr>
+  <tr><td><code>feed-url</code></td><td>Print feed URL. Lookup by <code>--email</code> or <code>--npub</code></td></tr>
+  <tr><td><code>revoke &lt;id&gt;</code></td><td>Revoke all tokens for a BTCPay subscriber ID. Prompts for confirmation unless <code>--yes</code></td></tr>
+  <tr><td><code>stats</code></td><td>Print counts: total subscribers, active tokens, never-accessed, expired-unnotified</td></tr>
+  <tr><td><code>cleanup</code></td><td>POST to <code>/admin/cleanup</code> on the running service (requires <code>ADMIN_TOKEN</code> env)</td></tr>
+  <tr><td><code>test-webhook</code></td><td>End-to-end service validation: health, metrics, webhook, feed proxy, expiry flow</td></tr>
+</table>
+
+<h3><code>test-webhook</code> flags</h3>
+<table>
+  <tr><th>Flag</th><th>Description</th></tr>
+  <tr><td><code>--service-url URL</code></td><td>Default: <code>$SERVICE_URL</code> or <code>http://127.0.0.1:8765</code></td></tr>
+  <tr><td><code>--webhook-secret S</code></td><td>Value of <code>BTCPAY_WEBHOOK_SECRET</code> (required)</td></tr>
+  <tr><td><code>--npub KEY</code></td><td>Nostr npub/hex for test subscriber</td></tr>
+  <tr><td><code>--email ADDR</code></td><td>Email for test subscriber</td></tr>
+  <tr><td><code>--feed-url URL</code></td><td>Validate upstream feed returns real RSS content</td></tr>
+  <tr><td><code>--run-expiry-test</code></td><td>Also test expiry injection and 402 flow</td></tr>
+</table>
+
+<!-- ─── Security notes ───────────────────────────────────────────────────── -->
+
+<h2 id="security">Security notes</h2>
+<ul>
+  <li>Webhook signatures verified with <code>hmac.Equal</code> (constant-time comparison, prevents timing attacks)</li>
+  <li>Admin bearer token compared with <code>hmac.Equal</code> (constant-time)</li>
+  <li>NIP-98 replay window is 60 seconds — clients must generate events fresh</li>
+  <li>Feed tokens are 32 bytes of random data (256-bit entropy), base64url-encoded</li>
+  <li>SMTP uses STARTTLS via Go's <code>net/smtp.SendMail</code></li>
+  <li>Service binds to <code>127.0.0.1</code> only; nginx handles TLS and public routing</li>
+  <li><code>/admin/cleanup</code> and <code>/metrics</code> are not intended to be publicly routed</li>
+</ul>
+
+<footer>
+  <a href="../index.html">← Back to docs</a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/genebean/podcast-members-feed">GitHub</a>
+  &nbsp;·&nbsp;
+  MIT License
+</footer>
+
+</body>
+</html>
