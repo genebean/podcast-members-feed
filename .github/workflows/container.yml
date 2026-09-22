@@ -26,9 +26,6 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v22
 
-      - name: Enable Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v13
-
       - name: Run tests
         # Go is provided by the flake devShell — not installed on the host.
         run: nix develop --command go test ./...
@@ -47,11 +44,6 @@ jobs:
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v22
-
-      - name: Enable Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v13
-        # Caches Nix store paths in GitHub Actions cache.
-        # Dramatically speeds up subsequent builds.
 
       - name: Build Docker image with Nix
         run: |
