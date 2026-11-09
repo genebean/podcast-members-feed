@@ -2,21 +2,22 @@ package nostr
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strconv"
 	"sync"
 	"sync/atomic"
 )
 
+// Subscription represents a subscription to a relay.
 type Subscription struct {
-	label   string
-	counter int
+	counter int64
+	id      string
 
 	Relay   *Relay
 	Filters Filters
 
 	// for this to be treated as a COUNT and not a REQ this must be set
-	countResult chan int64
+	countResult chan CountEnvelope
 
 	// the Events channel emits all EVENTs that come in a Subscription
 	// will be closed when the subscription ends
@@ -32,24 +33,25 @@ type Subscription struct {
 	// Context will be .Done() when the subscription ends
 	Context context.Context
 
+	// if it is not nil, checkDuplicate will be called for every event received
+	// if it returns true that event will not be processed further.
+	checkDuplicate func(id string, relay string) bool
+
+	// if it is not nil, checkDuplicateReplaceable will be called for every event received
+	// if it returns true that event will not be processed further.
+	checkDuplicateReplaceable func(rk ReplaceableKey, ts Timestamp) bool
+
 	match  func(*Event) bool // this will be either Filters.Match or Filters.MatchIgnoringTimestampConstraints
 	live   atomic.Bool
 	eosed  atomic.Bool
-	closed atomic.Bool
-	cancel context.CancelFunc
+	cancel context.CancelCauseFunc
 
 	// this keeps track of the events we've received before the EOSE that we must dispatch before
 	// closing the EndOfStoredEvents channel
 	storedwg sync.WaitGroup
 }
 
-type EventMessage struct {
-	Event Event
-	Relay string
-}
-
-// When instantiating relay connections, some options may be passed.
-// SubscriptionOption is the type of the argument passed for that.
+// SubscriptionOption is the type of the argument passed when instantiating relay connections.
 // Some examples are WithLabel.
 type SubscriptionOption interface {
 	IsSubscriptionOption()
@@ -60,24 +62,36 @@ type WithLabel string
 
 func (_ WithLabel) IsSubscriptionOption() {}
 
-var _ SubscriptionOption = (WithLabel)("")
+// WithCheckDuplicate sets checkDuplicate on the subscription
+type WithCheckDuplicate func(id, relay string) bool
 
-// GetID return the Nostr subscription ID as given to the Relay
-// it is a concatenation of the label and a serial number.
-func (sub *Subscription) GetID() string {
-	return sub.label + ":" + strconv.Itoa(sub.counter)
-}
+func (_ WithCheckDuplicate) IsSubscriptionOption() {}
+
+// WithCheckDuplicateReplaceable sets checkDuplicateReplaceable on the subscription
+type WithCheckDuplicateReplaceable func(rk ReplaceableKey, ts Timestamp) bool
+
+func (_ WithCheckDuplicateReplaceable) IsSubscriptionOption() {}
+
+var (
+	_ SubscriptionOption = (WithLabel)("")
+	_ SubscriptionOption = (WithCheckDuplicate)(nil)
+	_ SubscriptionOption = (WithCheckDuplicateReplaceable)(nil)
+)
 
 func (sub *Subscription) start() {
 	<-sub.Context.Done()
+
 	// the subscription ends once the context is canceled (if not already)
-	sub.Unsub() // this will set sub.live to false
+	sub.unsub(errors.New("context done on start()")) // this will set sub.live to false
 
 	// do this so we don't have the possibility of closing the Events channel and then trying to send to it
 	sub.mu.Lock()
 	close(sub.Events)
 	sub.mu.Unlock()
 }
+
+// GetID returns the subscription ID.
+func (sub *Subscription) GetID() string { return sub.id }
 
 func (sub *Subscription) dispatchEvent(evt *Event) {
 	added := false
@@ -113,19 +127,25 @@ func (sub *Subscription) dispatchEose() {
 	}
 }
 
-func (sub *Subscription) dispatchClosed(reason string) {
-	if sub.closed.CompareAndSwap(false, true) {
-		go func() {
-			sub.ClosedReason <- reason
-		}()
-	}
+// handleClosed handles the CLOSED message from a relay.
+func (sub *Subscription) handleClosed(reason string) {
+	go func() {
+		sub.ClosedReason <- reason
+		sub.live.Store(false) // set this so we don't send an unnecessary CLOSE to the relay
+		sub.unsub(fmt.Errorf("CLOSED received: %s", reason))
+	}()
 }
 
 // Unsub closes the subscription, sending "CLOSE" to relay as in NIP-01.
 // Unsub() also closes the channel sub.Events and makes a new one.
 func (sub *Subscription) Unsub() {
+	sub.unsub(errors.New("Unsub() called"))
+}
+
+// unsub is the internal implementation of Unsub.
+func (sub *Subscription) unsub(err error) {
 	// cancel the context (if it's not canceled already)
-	sub.cancel()
+	sub.cancel(err)
 
 	// mark subscription as closed and send a CLOSE to the relay (naïve sync.Once implementation)
 	if sub.live.CompareAndSwap(true, false) {
@@ -133,14 +153,13 @@ func (sub *Subscription) Unsub() {
 	}
 
 	// remove subscription from our map
-	sub.Relay.Subscriptions.Delete(sub.GetID())
+	sub.Relay.Subscriptions.Delete(sub.counter)
 }
 
 // Close just sends a CLOSE message. You probably want Unsub() instead.
 func (sub *Subscription) Close() {
 	if sub.Relay.IsConnected() {
-		id := sub.GetID()
-		closeMsg := CloseEnvelope(id)
+		closeMsg := CloseEnvelope(sub.id)
 		closeb, _ := (&closeMsg).MarshalJSON()
 		<-sub.Relay.Write(closeb)
 	}
@@ -155,19 +174,20 @@ func (sub *Subscription) Sub(_ context.Context, filters Filters) {
 
 // Fire sends the "REQ" command to the relay.
 func (sub *Subscription) Fire() error {
-	id := sub.GetID()
-
 	var reqb []byte
 	if sub.countResult == nil {
-		reqb, _ = ReqEnvelope{id, sub.Filters}.MarshalJSON()
+		reqb, _ = ReqEnvelope{sub.id, sub.Filters}.MarshalJSON()
+	} else if len(sub.Filters) == 1 {
+		reqb, _ = CountEnvelope{sub.id, sub.Filters[0], nil, nil}.MarshalJSON()
 	} else {
-		reqb, _ = CountEnvelope{id, sub.Filters, nil}.MarshalJSON()
+		return fmt.Errorf("unexpected sub configuration")
 	}
 
 	sub.live.Store(true)
 	if err := <-sub.Relay.Write(reqb); err != nil {
-		sub.cancel()
-		return fmt.Errorf("failed to write: %w", err)
+		err := fmt.Errorf("failed to write: %w", err)
+		sub.cancel(err)
+		return err
 	}
 
 	return nil

@@ -4,42 +4,40 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/gobwas/ws"
-	"github.com/gobwas/ws/wsutil"
 	"github.com/puzpuzpuz/xsync/v3"
 )
 
-type Status int
+var subscriptionIDCounter atomic.Int64
 
-var subscriptionIDCounter atomic.Int32
-
+// Relay represents a connection to a Nostr relay.
 type Relay struct {
 	closeMutex sync.Mutex
 
 	URL           string
-	RequestHeader http.Header // e.g. for origin header
+	requestHeader http.Header // e.g. for origin header
 
 	Connection    *Connection
-	Subscriptions *xsync.MapOf[string, *Subscription]
+	Subscriptions *xsync.MapOf[int64, *Subscription]
 
 	ConnectionError         error
 	connectionContext       context.Context // will be canceled when the connection closes
-	connectionContextCancel context.CancelFunc
+	connectionContextCancel context.CancelCauseFunc
 
 	challenge                     string       // NIP-42 challenge, we only keep the last
 	noticeHandler                 func(string) // NIP-01 NOTICEs
-	customHandler                 func([]byte) // nonstandard unparseable messages
+	customHandler                 func(string) // nonstandard unparseable messages
 	okCallbacks                   *xsync.MapOf[string, func(bool, string)]
 	writeQueue                    chan writeRequest
 	subscriptionChannelCloseQueue chan *Subscription
-	signatureChecker              func(Event) bool
 
 	// custom things that aren't often used
 	//
@@ -51,22 +49,18 @@ type writeRequest struct {
 	answer chan error
 }
 
-// NewRelay returns a new relay. The relay connection will be closed when the context is canceled.
+// NewRelay returns a new relay. It takes a context that, when canceled, will close the relay connection.
 func NewRelay(ctx context.Context, url string, opts ...RelayOption) *Relay {
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancelCause(ctx)
 	r := &Relay{
 		URL:                           NormalizeURL(url),
 		connectionContext:             ctx,
 		connectionContextCancel:       cancel,
-		Subscriptions:                 xsync.NewMapOf[string, *Subscription](),
+		Subscriptions:                 xsync.NewMapOf[int64, *Subscription](),
 		okCallbacks:                   xsync.NewMapOf[string, func(bool, string)](),
 		writeQueue:                    make(chan writeRequest),
 		subscriptionChannelCloseQueue: make(chan *Subscription),
-		signatureChecker: func(e Event) bool {
-			ok, _ := e.CheckSignature()
-			return ok
-		},
-		RequestHeader: make(http.Header, 1),
+		requestHeader:                 nil,
 	}
 
 	for _, opt := range opts {
@@ -77,24 +71,26 @@ func NewRelay(ctx context.Context, url string, opts ...RelayOption) *Relay {
 }
 
 // RelayConnect returns a relay object connected to url.
-// Once successfully connected, cancelling ctx has no effect.
-// To close the connection, call r.Close().
+//
+// The given subscription is only used during the connection phase. Once successfully connected, cancelling ctx has no effect.
+//
+// The ongoing relay connection uses a background context. To close the connection, call r.Close().
+// If you need fine grained long-term connection contexts, use NewRelay() instead.
 func RelayConnect(ctx context.Context, url string, opts ...RelayOption) (*Relay, error) {
 	r := NewRelay(context.Background(), url, opts...)
 	err := r.Connect(ctx)
 	return r, err
 }
 
-// When instantiating relay connections, some options may be passed.
-// RelayOption is the type of the argument passed for that.
+// RelayOption is the type of the argument passed when instantiating relay connections.
 type RelayOption interface {
 	ApplyRelayOption(*Relay)
 }
 
 var (
 	_ RelayOption = (WithNoticeHandler)(nil)
-	_ RelayOption = (WithSignatureChecker)(nil)
 	_ RelayOption = (WithCustomHandler)(nil)
+	_ RelayOption = (WithRequestHeader)(nil)
 )
 
 // WithNoticeHandler just takes notices and is expected to do something with them.
@@ -105,20 +101,19 @@ func (nh WithNoticeHandler) ApplyRelayOption(r *Relay) {
 	r.noticeHandler = nh
 }
 
-// WithSignatureChecker must be a function that checks the signature of an
-// event and returns true or false.
-type WithSignatureChecker func(Event) bool
-
-func (sc WithSignatureChecker) ApplyRelayOption(r *Relay) {
-	r.signatureChecker = sc
-}
-
 // WithCustomHandler must be a function that handles any relay message that couldn't be
 // parsed as a standard envelope.
-type WithCustomHandler func(data []byte)
+type WithCustomHandler func(data string)
 
 func (ch WithCustomHandler) ApplyRelayOption(r *Relay) {
 	r.customHandler = ch
+}
+
+// WithRequestHeader sets the HTTP request header of the websocket preflight request.
+type WithRequestHeader http.Header
+
+func (ch WithRequestHeader) ApplyRelayOption(r *Relay) {
+	r.requestHeader = http.Header(ch)
 }
 
 // String just returns the relay URL.
@@ -127,6 +122,7 @@ func (r *Relay) String() string {
 }
 
 // Context retrieves the context that is associated with this relay connection.
+// It will be closed when the relay is disconnected.
 func (r *Relay) Context() context.Context { return r.connectionContext }
 
 // IsConnected returns true if the connection to this relay seems to be active.
@@ -137,14 +133,13 @@ func (r *Relay) IsConnected() bool { return r.connectionContext.Err() == nil }
 // Once successfully connected, context expiration has no effect: call r.Close
 // to close the connection.
 //
-// The underlying relay connection will use a background context. If you want to
-// pass a custom context to the underlying relay connection, use NewRelay() and
-// then Relay.Connect().
+// The given context here is only used during the connection phase. The long-living
+// relay connection will be based on the context given to NewRelay().
 func (r *Relay) Connect(ctx context.Context) error {
 	return r.ConnectWithTLS(ctx, nil)
 }
 
-// ConnectWithTLS tries to establish a secured websocket connection to r.URL using customized tls.Config (CA's, etc).
+// ConnectWithTLS is like Connect(), but takes a special tls.Config if you need that.
 func (r *Relay) ConnectWithTLS(ctx context.Context, tlsConfig *tls.Config) error {
 	if r.connectionContext == nil || r.Subscriptions == nil {
 		return fmt.Errorf("relay must be initialized with a call to NewRelay()")
@@ -157,15 +152,11 @@ func (r *Relay) ConnectWithTLS(ctx context.Context, tlsConfig *tls.Config) error
 	if _, ok := ctx.Deadline(); !ok {
 		// if no timeout is set, force it to 7 seconds
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 7*time.Second)
+		ctx, cancel = context.WithTimeoutCause(ctx, 7*time.Second, errors.New("connection took too long"))
 		defer cancel()
 	}
 
-	if r.RequestHeader.Get("User-Agent") == "" {
-		r.RequestHeader.Set("User-Agent", "github.com/nbd-wtf/go-nostr")
-	}
-
-	conn, err := NewConnection(ctx, r.URL, r.RequestHeader, tlsConfig)
+	conn, err := NewConnection(ctx, r.URL, r.requestHeader, tlsConfig)
 	if err != nil {
 		return fmt.Errorf("error opening websocket to '%s': %w", r.URL, err)
 	}
@@ -174,34 +165,40 @@ func (r *Relay) ConnectWithTLS(ctx context.Context, tlsConfig *tls.Config) error
 	// ping every 29 seconds
 	ticker := time.NewTicker(29 * time.Second)
 
-	// to be used when the connection is closed
-	go func() {
-		<-r.connectionContext.Done()
-
-		// stop the ticker
-		ticker.Stop()
-
-		// nil the connection
-		r.Connection = nil
-
-		// close all subscriptions
-		r.Subscriptions.Range(func(_ string, sub *Subscription) bool {
-			go sub.Unsub()
-			return true
-		})
-	}()
-
 	// queue all write operations here so we don't do mutex spaghetti
 	go func() {
+		pingAttempt := 0
 		for {
 			select {
-			case <-ticker.C:
-				err := wsutil.WriteClientMessage(r.Connection.conn, ws.OpPing, nil)
-				if err != nil {
-					InfoLogger.Printf("{%s} error writing ping: %v; closing websocket", r.URL, err)
-					r.Close() // this should trigger a context cancelation
-					return
+			case <-r.connectionContext.Done():
+				ticker.Stop()
+				r.Connection = nil
+
+				for _, sub := range r.Subscriptions.Range {
+					sub.unsub(fmt.Errorf("relay connection closed: %w / %w", context.Cause(r.connectionContext), r.ConnectionError))
 				}
+				return
+
+			case <-ticker.C:
+				debugLogf("{%s} pinging relay", r.URL)
+				err := r.Connection.Ping(r.connectionContext)
+				if err != nil {
+					pingAttempt++
+					debugLogf("{%s} error writing ping (attempt %d): %v", r.URL, pingAttempt, err)
+
+					if pingAttempt >= 3 {
+						debugLogf("{%s} error writing ping after multiple attempts; closing websocket", r.URL)
+						err = r.Close() // this should trigger a context cancelation
+						if err != nil {
+							debugLogf("{%s} failed to close relay: %v", r.URL, err)
+						}
+					}
+					continue
+				}
+				// ping was OK
+				debugLogf("{%s} ping OK", r.URL)
+				pingAttempt = 0
+
 			case writeRequest := <-r.writeQueue:
 				// all write requests will go through this to prevent races
 				debugLogf("{%s} sending %v\n", r.URL, string(writeRequest.msg))
@@ -209,9 +206,6 @@ func (r *Relay) ConnectWithTLS(ctx context.Context, tlsConfig *tls.Config) error
 					writeRequest.answer <- err
 				}
 				close(writeRequest.answer)
-			case <-r.connectionContext.Done():
-				// stop here
-				return
 			}
 		}
 	}()
@@ -219,20 +213,42 @@ func (r *Relay) ConnectWithTLS(ctx context.Context, tlsConfig *tls.Config) error
 	// general message reader loop
 	go func() {
 		buf := new(bytes.Buffer)
+		mp := NewMessageParser()
 
 		for {
 			buf.Reset()
+
 			if err := conn.ReadMessage(r.connectionContext, buf); err != nil {
 				r.ConnectionError = err
-				r.Close()
+				r.close(err)
 				break
 			}
 
-			message := buf.Bytes()
-			debugLogf("{%s} %v\n", r.URL, message)
-			envelope := ParseMessage(message)
+			message := string(buf.Bytes())
+			debugLogf("{%s} received %v\n", r.URL, message)
+
+			// if this is an "EVENT" we will have this preparser logic that should speed things up a little
+			// as we skip handling duplicate events
+			subid := extractSubID(message)
+			sub, ok := r.Subscriptions.Load(subIdToSerial(subid))
+			if ok {
+				if sub.checkDuplicate != nil {
+					if sub.checkDuplicate(extractEventID(message[10+len(subid):]), r.URL) {
+						continue
+					}
+				} else if sub.checkDuplicateReplaceable != nil {
+					if sub.checkDuplicateReplaceable(
+						ReplaceableKey{extractEventPubKey(message), extractDTag(message)},
+						extractTimestamp(message),
+					) {
+						continue
+					}
+				}
+			}
+
+			envelope, err := mp.ParseMessage(message)
 			if envelope == nil {
-				if r.customHandler != nil {
+				if r.customHandler != nil && err == UnknownLabel {
 					r.customHandler(message)
 				}
 				continue
@@ -252,41 +268,39 @@ func (r *Relay) ConnectWithTLS(ctx context.Context, tlsConfig *tls.Config) error
 				}
 				r.challenge = *env.Challenge
 			case *EventEnvelope:
-				if env.SubscriptionID == nil {
-					continue
-				}
-				if subscription, ok := r.Subscriptions.Load(*env.SubscriptionID); !ok {
+				// we already have the subscription from the pre-check above, so we can just reuse it
+				if sub == nil {
 					// InfoLogger.Printf("{%s} no subscription with id '%s'\n", r.URL, *env.SubscriptionID)
 					continue
 				} else {
 					// check if the event matches the desired filter, ignore otherwise
-					if !subscription.match(&env.Event) {
-						InfoLogger.Printf("{%s} filter does not match: %v ~ %v\n", r.URL, subscription.Filters, env.Event)
+					if !sub.match(&env.Event) {
+						InfoLogger.Printf("{%s} filter does not match: %v ~ %v\n", r.URL, sub.Filters, env.Event)
 						continue
 					}
 
 					// check signature, ignore invalid, except from trusted (AssumeValid) relays
 					if !r.AssumeValid {
-						if ok := r.signatureChecker(env.Event); !ok {
+						if ok, _ := env.Event.CheckSignature(); !ok {
 							InfoLogger.Printf("{%s} bad signature on %s\n", r.URL, env.Event.ID)
 							continue
 						}
 					}
 
 					// dispatch this to the internal .events channel of the subscription
-					subscription.dispatchEvent(&env.Event)
+					sub.dispatchEvent(&env.Event)
 				}
 			case *EOSEEnvelope:
-				if subscription, ok := r.Subscriptions.Load(string(*env)); ok {
+				if subscription, ok := r.Subscriptions.Load(subIdToSerial(string(*env))); ok {
 					subscription.dispatchEose()
 				}
 			case *ClosedEnvelope:
-				if subscription, ok := r.Subscriptions.Load(string(env.SubscriptionID)); ok {
-					subscription.dispatchClosed(env.Reason)
+				if subscription, ok := r.Subscriptions.Load(subIdToSerial(env.SubscriptionID)); ok {
+					subscription.handleClosed(env.Reason)
 				}
 			case *CountEnvelope:
-				if subscription, ok := r.Subscriptions.Load(string(env.SubscriptionID)); ok && env.Count != nil && subscription.countResult != nil {
-					subscription.countResult <- *env.Count
+				if subscription, ok := r.Subscriptions.Load(subIdToSerial(env.SubscriptionID)); ok && env.Count != nil && subscription.countResult != nil {
+					subscription.countResult <- *env
 				}
 			case *OKEnvelope:
 				if okCallback, exist := r.okCallbacks.Load(env.EventID); exist {
@@ -301,7 +315,7 @@ func (r *Relay) ConnectWithTLS(ctx context.Context, tlsConfig *tls.Config) error
 	return nil
 }
 
-// Write queues a message to be sent to the relay.
+// Write queues an arbitrary message to be sent to the relay.
 func (r *Relay) Write(msg []byte) <-chan error {
 	ch := make(chan error)
 	select {
@@ -318,6 +332,9 @@ func (r *Relay) Publish(ctx context.Context, event Event) error {
 }
 
 // Auth sends an "AUTH" command client->relay as in NIP-42 and waits for an OK response.
+//
+// You don't have to build the AUTH event yourself, this function takes a function to which the
+// event that must be signed will be passed, so it's only necessary to sign that.
 func (r *Relay) Auth(ctx context.Context, sign func(event *Event) error) error {
 	authEvent := Event{
 		CreatedAt: Now(),
@@ -335,7 +352,6 @@ func (r *Relay) Auth(ctx context.Context, sign func(event *Event) error) error {
 	return r.publish(ctx, authEvent.ID, &AuthEnvelope{Event: authEvent})
 }
 
-// publish can be used both for EVENT and for AUTH
 func (r *Relay) publish(ctx context.Context, id string, env Envelope) error {
 	var err error
 	var cancel context.CancelFunc
@@ -408,13 +424,13 @@ func (r *Relay) Subscribe(ctx context.Context, filters Filters, opts ...Subscrip
 // Failure to do that will result in a huge number of halted goroutines being created.
 func (r *Relay) PrepareSubscription(ctx context.Context, filters Filters, opts ...SubscriptionOption) *Subscription {
 	current := subscriptionIDCounter.Add(1)
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancelCause(ctx)
 
 	sub := &Subscription{
 		Relay:             r,
 		Context:           ctx,
 		cancel:            cancel,
-		counter:           int(current),
+		counter:           current,
 		Events:            make(chan *Event),
 		EndOfStoredEvents: make(chan struct{}, 1),
 		ClosedReason:      make(chan string, 1),
@@ -422,15 +438,28 @@ func (r *Relay) PrepareSubscription(ctx context.Context, filters Filters, opts .
 		match:             filters.Match,
 	}
 
+	label := ""
 	for _, opt := range opts {
 		switch o := opt.(type) {
 		case WithLabel:
-			sub.label = string(o)
+			label = string(o)
+		case WithCheckDuplicate:
+			sub.checkDuplicate = o
+		case WithCheckDuplicateReplaceable:
+			sub.checkDuplicateReplaceable = o
 		}
 	}
 
-	id := sub.GetID()
-	r.Subscriptions.Store(id, sub)
+	// subscription id computation
+	buf := subIdPool.Get().([]byte)[:0]
+	buf = strconv.AppendInt(buf, sub.counter, 10)
+	buf = append(buf, ':')
+	buf = append(buf, label...)
+	defer subIdPool.Put(buf)
+	sub.id = string(buf)
+
+	// we track subscriptions only by their counter, no need for the full id
+	r.Subscriptions.Store(int64(sub.counter), sub)
 
 	// start handling events, eose, unsub etc:
 	go sub.start()
@@ -438,6 +467,9 @@ func (r *Relay) PrepareSubscription(ctx context.Context, filters Filters, opts .
 	return sub
 }
 
+// QueryEvents subscribes to events matching the given filter and returns a channel of events.
+//
+// In most cases it's better to use SimplePool instead of this method.
 func (r *Relay) QueryEvents(ctx context.Context, filter Filter) (chan *Event, error) {
 	sub, err := r.Subscribe(ctx, Filters{filter})
 	if err != nil {
@@ -452,18 +484,23 @@ func (r *Relay) QueryEvents(ctx context.Context, filter Filter) (chan *Event, er
 			case <-ctx.Done():
 			case <-r.Context().Done():
 			}
-			sub.Unsub()
+			sub.unsub(errors.New("QueryEvents() ended"))
+			return
 		}
 	}()
 
 	return sub.Events, nil
 }
 
+// QuerySync subscribes to events matching the given filter and returns a slice of events.
+// This method blocks until all events are received or the context is canceled.
+//
+// In most cases it's better to use SimplePool instead of this method.
 func (r *Relay) QuerySync(ctx context.Context, filter Filter) ([]*Event, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		// if no timeout is set, force it to 7 seconds
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 7*time.Second)
+		ctx, cancel = context.WithTimeoutCause(ctx, 7*time.Second, errors.New("QuerySync() took too long"))
 		defer cancel()
 	}
 
@@ -480,20 +517,34 @@ func (r *Relay) QuerySync(ctx context.Context, filter Filter) ([]*Event, error) 
 	return events, nil
 }
 
-func (r *Relay) Count(ctx context.Context, filters Filters, opts ...SubscriptionOption) (int64, error) {
-	sub := r.PrepareSubscription(ctx, filters, opts...)
-	sub.countResult = make(chan int64)
-
-	if err := sub.Fire(); err != nil {
-		return 0, err
+// Count sends a "COUNT" command to the relay and returns the count of events matching the filters.
+func (r *Relay) Count(
+	ctx context.Context,
+	filters Filters,
+	opts ...SubscriptionOption,
+) (int64, []byte, error) {
+	v, err := r.countInternal(ctx, filters, opts...)
+	if err != nil {
+		return 0, nil, err
 	}
 
-	defer sub.Unsub()
+	return *v.Count, v.HyperLogLog, nil
+}
+
+func (r *Relay) countInternal(ctx context.Context, filters Filters, opts ...SubscriptionOption) (CountEnvelope, error) {
+	sub := r.PrepareSubscription(ctx, filters, opts...)
+	sub.countResult = make(chan CountEnvelope)
+
+	if err := sub.Fire(); err != nil {
+		return CountEnvelope{}, err
+	}
+
+	defer sub.unsub(errors.New("countInternal() ended"))
 
 	if _, ok := ctx.Deadline(); !ok {
 		// if no timeout is set, force it to 7 seconds
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 7*time.Second)
+		ctx, cancel = context.WithTimeoutCause(ctx, 7*time.Second, errors.New("countInternal took too long"))
 		defer cancel()
 	}
 
@@ -502,19 +553,24 @@ func (r *Relay) Count(ctx context.Context, filters Filters, opts ...Subscription
 		case count := <-sub.countResult:
 			return count, nil
 		case <-ctx.Done():
-			return 0, ctx.Err()
+			return CountEnvelope{}, ctx.Err()
 		}
 	}
 }
 
+// Close closes the relay connection.
 func (r *Relay) Close() error {
+	return r.close(errors.New("Close() called"))
+}
+
+func (r *Relay) close(reason error) error {
 	r.closeMutex.Lock()
 	defer r.closeMutex.Unlock()
 
 	if r.connectionContextCancel == nil {
 		return fmt.Errorf("relay already closed")
 	}
-	r.connectionContextCancel()
+	r.connectionContextCancel(reason)
 	r.connectionContextCancel = nil
 
 	if r.Connection == nil {
@@ -527,4 +583,8 @@ func (r *Relay) Close() error {
 	}
 
 	return nil
+}
+
+var subIdPool = sync.Pool{
+	New: func() any { return make([]byte, 0, 15) },
 }
