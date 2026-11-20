@@ -1,8 +1,6 @@
 package nostr
 
 import (
-	json "encoding/json"
-
 	easyjson "github.com/mailru/easyjson"
 	jlexer "github.com/mailru/easyjson/jlexer"
 	jwriter "github.com/mailru/easyjson/jwriter"
@@ -10,7 +8,6 @@ import (
 
 // suppress unused package warning
 var (
-	_ *json.RawMessage
 	_ *jlexer.Lexer
 	_ *jwriter.Writer
 	_ easyjson.Marshaler
@@ -25,7 +22,6 @@ func easyjsonF642ad3eDecodeGithubComNbdWtfGoNostr(in *jlexer.Lexer, out *Event) 
 		in.Skip()
 		return
 	}
-	out.extra = make(map[string]any)
 	in.Delim('{')
 	for !in.IsDelim('}') {
 		key := in.UnsafeFieldName(true)
@@ -73,7 +69,7 @@ func easyjsonF642ad3eDecodeGithubComNbdWtfGoNostr(in *jlexer.Lexer, out *Event) 
 						}
 						for !in.IsDelim(']') {
 							var v2 string
-							v2 = string(in.String())
+							v2 = in.String()
 							v1 = append(v1, v2)
 							in.WantComma()
 						}
@@ -88,8 +84,6 @@ func easyjsonF642ad3eDecodeGithubComNbdWtfGoNostr(in *jlexer.Lexer, out *Event) 
 			out.Content = in.String()
 		case "sig":
 			out.Sig = in.String()
-		default:
-			out.extra[key] = in.Interface()
 		}
 		in.WantComma()
 	}
@@ -140,7 +134,7 @@ func easyjsonF642ad3eEncodeGithubComNbdWtfGoNostr(out *jwriter.Writer, in Event)
 				if v5 > 0 {
 					out.RawByte(',')
 				}
-				out.String(string(v6))
+				out.String(v6)
 			}
 			out.RawByte(']')
 		}
@@ -158,24 +152,19 @@ func easyjsonF642ad3eEncodeGithubComNbdWtfGoNostr(out *jwriter.Writer, in Event)
 			out.String(in.Sig)
 		}
 	}
-	{
-		for key, value := range in.extra {
-			out.RawString(",\"" + key + "\":")
-			out.Raw(json.Marshal(value))
-		}
-	}
 	out.RawByte('}')
 }
 
 // MarshalJSON supports json.Marshaler interface
 func (v Event) MarshalJSON() ([]byte, error) {
-	w := jwriter.Writer{}
+	w := jwriter.Writer{NoEscapeHTML: true}
 	easyjsonF642ad3eEncodeGithubComNbdWtfGoNostr(&w, v)
 	return w.Buffer.BuildBytes(), w.Error
 }
 
 // MarshalEasyJSON supports easyjson.Marshaler interface
 func (v Event) MarshalEasyJSON(w *jwriter.Writer) {
+	w.NoEscapeHTML = true
 	easyjsonF642ad3eEncodeGithubComNbdWtfGoNostr(w, v)
 }
 

@@ -1,3 +1,11 @@
+<div>
+<p><b>This repository is in maintenance mode and adventurous programmers are encouraged to try <a href="https://pkg.go.dev/fiatjaf.com/nostr"><code>fiatjaf.com/nostr@master</code></a> instead.</b></p>
+
+<p>The core codebase and functionality are the same, but the API breaks a little bit (for good reason) and there are some new features.</p>
+</div>
+
+---
+
 [![Run Tests](https://github.com/nbd-wtf/go-nostr/actions/workflows/test.yml/badge.svg)](https://github.com/nbd-wtf/go-nostr/actions/workflows/test.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/nbd-wtf/go-nostr.svg)](https://pkg.go.dev/github.com/nbd-wtf/go-nostr)
 [![Go Report Card](https://goreportcard.com/badge/github.com/nbd-wtf/go-nostr)](https://goreportcard.com/report/github.com/nbd-wtf/go-nostr)
@@ -7,7 +15,7 @@
 go-nostr
 ========
 
-A set of useful things for [Nostr Protocol](https://github.com/nostr-protocol/nostr) implementations.
+A set of useful things for [Nostr](https://github.com/nostr-protocol/nostr)-related software.
 
 ```bash
 go get github.com/nbd-wtf/go-nostr
@@ -124,6 +132,33 @@ nostr.InfoLogger = log.New(io.Discard, "", 0)
 
 ```
 go run example/example.go
+```
+
+### Using [`libsecp256k1`](https://github.com/bitcoin-core/secp256k1)
+
+[`libsecp256k1`](https://github.com/bitcoin-core/secp256k1) is very fast:
+
+```
+goos: linux
+goarch: amd64
+cpu: Intel(R) Core(TM) i5-2400 CPU @ 3.10GHz
+BenchmarkWithoutLibsecp256k1/sign-4          	    2794	    434114 ns/op
+BenchmarkWithoutLibsecp256k1/check-4         	    4352	    297416 ns/op
+BenchmarkWithLibsecp256k1/sign-4             	   12559	     94607 ns/op
+BenchmarkWithLibsecp256k1/check-4            	   13761	     84595 ns/op
+PASS
+```
+
+But to use it you need the host to have it installed as a shared library and CGO to be supported, so we don't compile against it by default.
+
+To use it, use `-tags=libsecp256k1` whenever you're compiling your program that uses this library.
+
+### Test for Wasm
+
+Install [wasmbrowsertest](https://github.com/agnivade/wasmbrowsertest), then run tests:
+
+```sh
+GOOS=js GOARCH=wasm go test -short ./...
 ```
 
 ## Warning: risk of goroutine bloat (if used incorrectly)
