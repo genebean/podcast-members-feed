@@ -1,15 +1,21 @@
 package nostr
 
 import (
+	"strconv"
+	"strings"
 	"sync"
 	"unsafe"
 
+	jsoniter "github.com/json-iterator/go"
 	"golang.org/x/exp/constraints"
 )
 
 const MAX_LOCKS = 50
 
-var namedMutexPool = make([]sync.Mutex, MAX_LOCKS)
+var (
+	namedMutexPool = make([]sync.Mutex, MAX_LOCKS)
+	json           = jsoniter.ConfigFastest
+)
 
 //go:noescape
 //go:linkname memhash runtime.memhash
@@ -91,4 +97,121 @@ func arePointerValuesEqual[V comparable](a *V, b *V) bool {
 		return *a == *b
 	}
 	return false
+}
+
+func subIdToSerial(subId string) int64 {
+	n := strings.Index(subId, ":")
+	if n < 0 || n > len(subId) {
+		return -1
+	}
+	serialId, _ := strconv.ParseInt(subId[0:n], 10, 64)
+	return serialId
+}
+
+func isLowerHex(thing string) bool {
+	for _, charNumber := range thing {
+		if (charNumber >= 48 && charNumber <= 57) || (charNumber >= 97 && charNumber <= 102) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func extractSubID(jsonStr string) string {
+	// look for "EVENT" pattern
+	start := strings.Index(jsonStr, `"EVENT"`)
+	if start == -1 {
+		return ""
+	}
+
+	// move to the next quote
+	offset := strings.Index(jsonStr[start+7:], `"`)
+	if offset == -1 {
+		return ""
+	}
+
+	start += 7 + offset + 1
+
+	// find the ending quote
+	end := strings.Index(jsonStr[start:], `"`)
+
+	// get the contents
+	return jsonStr[start : start+end]
+}
+
+func extractEventID(jsonStr string) string {
+	// look for "id" pattern
+	start := strings.Index(jsonStr, `"id"`)
+	if start == -1 {
+		return ""
+	}
+
+	// move to the next quote
+	offset := strings.IndexRune(jsonStr[start+4:], '"')
+	start += 4 + offset + 1
+
+	// get 64 characters of the id
+	return jsonStr[start : start+64]
+}
+
+func extractEventPubKey(jsonStr string) string {
+	// look for "pubkey" pattern
+	start := strings.Index(jsonStr, `"pubkey"`)
+	if start == -1 {
+		return ""
+	}
+
+	// move to the next quote
+	offset := strings.IndexRune(jsonStr[start+8:], '"')
+	start += 8 + offset + 1
+
+	// get 64 characters of the pubkey
+	return jsonStr[start : start+64]
+}
+
+func extractDTag(jsonStr string) string {
+	// look for ["d", pattern
+	start := strings.Index(jsonStr, `["d"`)
+	if start == -1 {
+		return ""
+	}
+
+	// move to the next quote
+	offset := strings.IndexRune(jsonStr[start+4:], '"')
+	start += 4 + offset + 1
+
+	// find the ending quote
+	end := strings.IndexRune(jsonStr[start:], '"')
+	if end == -1 {
+		return ""
+	}
+
+	// get the contents
+	return jsonStr[start : start+end]
+}
+
+func extractTimestamp(jsonStr string) Timestamp {
+	// look for "created_at": pattern
+	start := strings.Index(jsonStr, `"created_at"`)
+	if start == -1 {
+		return 0
+	}
+
+	// move to the next number
+	offset := strings.IndexAny(jsonStr[start+12:], "9876543210")
+	if offset == -1 {
+		return 0
+	}
+	start += 12 + offset
+
+	// find the end
+	end := strings.IndexAny(jsonStr[start:], ",} ")
+	if end == -1 {
+		return 0
+	}
+
+	// get the contents
+	ts, _ := strconv.ParseInt(jsonStr[start:start+end], 10, 64)
+	return Timestamp(ts)
 }

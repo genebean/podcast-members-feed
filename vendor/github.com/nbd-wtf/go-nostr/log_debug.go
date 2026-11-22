@@ -3,8 +3,9 @@
 package nostr
 
 import (
-	"encoding/json"
 	"fmt"
+
+	jsoniter "github.com/json-iterator/go"
 )
 
 func debugLogf(str string, args ...any) {
@@ -27,7 +28,7 @@ func stringify(anything any) any {
 			printableValues[i] = stringify(subv)
 		}
 		return printableValues
-	case []json.RawMessage:
+	case []jsoniter.RawMessage:
 		j, _ := json.Marshal(v)
 		return string(j)
 	case []byte:
