@@ -26,6 +26,21 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v22
 
+      - name: Configure Attic cache (pull)
+        if: ${{ secrets.ATTIC_TOKEN != '' }}
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          echo "machine attic.home.technicalissues.us password $ATTIC_TOKEN" > "$HOME/.netrc"
+          chmod 600 "$HOME/.netrc"
+          {
+            echo "NIX_CONFIG<<ATTIC_NIX_CONFIG_EOF"
+            echo "extra-substituters = https://attic.home.technicalissues.us/genebean"
+            echo "extra-trusted-public-keys = genebean:bS9FNZbGEXaJzMJzN5eEva28eCKqDlRC61uC8NdWWL4="
+            echo "netrc-file = $HOME/.netrc"
+            echo "ATTIC_NIX_CONFIG_EOF"
+          } >> "$GITHUB_ENV"
+
       - name: Run tests
         # Go is provided by the flake devShell — not installed on the host.
         run: nix develop --command go test ./...
@@ -45,11 +60,34 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v22
 
+      - name: Configure Attic cache (pull)
+        if: ${{ secrets.ATTIC_TOKEN != '' }}
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          echo "machine attic.home.technicalissues.us password $ATTIC_TOKEN" > "$HOME/.netrc"
+          chmod 600 "$HOME/.netrc"
+          {
+            echo "NIX_CONFIG<<ATTIC_NIX_CONFIG_EOF"
+            echo "extra-substituters = https://attic.home.technicalissues.us/genebean"
+            echo "extra-trusted-public-keys = genebean:bS9FNZbGEXaJzMJzN5eEva28eCKqDlRC61uC8NdWWL4="
+            echo "netrc-file = $HOME/.netrc"
+            echo "ATTIC_NIX_CONFIG_EOF"
+          } >> "$GITHUB_ENV"
+
       - name: Build Docker image with Nix
         run: |
           nix build .#dockerImage --print-build-logs
           # The result symlink points at the image tarball
           echo "IMAGE_PATH=$(readlink -f result)" >> "$GITHUB_ENV"
+
+      - name: Push to Attic
+        if: ${{ secrets.ATTIC_TOKEN != '' }}
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          nix run nixpkgs#attic-client -- login genebean https://attic.home.technicalissues.us "$ATTIC_TOKEN" --set-default
+          nix run nixpkgs#attic-client -- push genebean ./result
 
       - name: Load image into Docker
         run: docker load < "$IMAGE_PATH"
